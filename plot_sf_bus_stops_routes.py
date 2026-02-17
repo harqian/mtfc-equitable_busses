@@ -7,13 +7,8 @@ import pandas as pd
 from branca.element import MacroElement, Template
 from shapely.geometry import LineString
 
+from data_utils import find_data_file
 
-def find_data_file(name: str) -> pathlib.Path:
-    candidates = [pathlib.Path('/data') / name, pathlib.Path('data') / name]
-    for path in candidates:
-        if path.exists():
-            return path
-    raise FileNotFoundError(f'Could not find {name} in /data or ./data')
 
 
 def add_route_toggle_control(map_obj: folium.Map) -> None:

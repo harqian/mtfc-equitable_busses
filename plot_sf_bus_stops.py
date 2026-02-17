@@ -5,7 +5,6 @@ import folium
 import geopandas as gpd
 import pandas as pd
 
-
 def main() -> None:
     stops_file = pathlib.Path("data/stops.txt")
     stops = pd.read_csv(stops_file)

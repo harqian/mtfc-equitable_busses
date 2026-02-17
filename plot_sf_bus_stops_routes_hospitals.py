@@ -7,14 +7,7 @@ import pandas as pd
 from branca.element import MacroElement, Template
 from shapely.geometry import LineString
 
-
-def find_data_file(name: str) -> pathlib.Path:
-    candidates = [pathlib.Path('/data') / name, pathlib.Path('data') / name, pathlib.Path(name), pathlib.Path(f'/{name}')]
-    for path in candidates:
-        if path.exists():
-            return path
-    raise FileNotFoundError(f'Could not find {name} in /data or ./data')
-
+from data_utils import find_data_file
 
 def add_route_toggle_control(map_obj: folium.Map) -> None:
     template = Template(
@@ -55,11 +48,16 @@ def main() -> None:
     hospitals = pd.read_csv(find_data_file('hospitals.csv'))
     
     # Load hospitals data
+    hospital_coords = hospitals["Location"].str.extract(r"\(([-\d.]+),\s*([-\d.]+)\)").astype(float)
+    # hospitals.csv stores "(lat, lon)", so x must come from column 1 and y from column 0.
+    hospital_geometry = gpd.points_from_xy(hospital_coords[1], hospital_coords[0])
+
     hospitals_gdf = gpd.GeoDataFrame(
         hospitals,
-        geometry=gpd.points_from_xy(hospitals['longitude'], hospitals['latitude']),
+        geometry=hospital_geometry,
         crs='EPSG:4326',
     )
+    hospitals_gdf = hospitals_gdf.dropna(subset=['geometry'])
 
     stops_gdf = gpd.GeoDataFrame(
         stops,
@@ -146,6 +144,28 @@ def main() -> None:
             tooltip=f'{row.stop_id}: {row.stop_name}',
         ).add_to(stops_layer)
     stops_layer.add_to(m)
+    
+    hospitals_layer = folium.FeatureGroup(name='Hospitals', show=True)
+    for row in hospitals_gdf.itertuples(index=False):
+        data = row._asdict()
+        name = (
+            data.get('Hospital_Name')
+            or data.get('Hospital Name')
+            or data.get('name')
+            or data.get('Name')
+            or data.get('Location')
+            or 'Hospital'
+        )
+        folium.CircleMarker(
+            location=[row.geometry.y, row.geometry.x],
+            radius=5,
+            color='green',
+            fill=True,
+            fill_opacity=1,
+            weight=1,
+            tooltip=str(name),
+        ).add_to(hospitals_layer)
+    hospitals_layer.add_to(m)
 
     for route_id, group in route_shapes_gdf.groupby('route_id', sort=True):
         first = group.iloc[0]
@@ -187,7 +207,7 @@ def main() -> None:
     folium.LayerControl(collapsed=False).add_to(m)
     add_route_toggle_control(m)
 
-    output = pathlib.Path('sf_bus_stops_routes_map.html')
+    output = pathlib.Path('sf_bus_stops_routes_map_hospitals.html')
     m.save(output)
     print(f'Wrote interactive map: {output.resolve()}')
 
