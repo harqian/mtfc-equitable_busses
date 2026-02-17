@@ -1,0 +1,5 @@
+rider_category_id,rider_category_name,is_default_fare_category,rider_category_description
+2,Senior,0,Senior
+3,Child,0,Child
+5,Youth,0,Youth
+6,Disabled,0,Disabled

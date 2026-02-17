@@ -1,0 +1,2 @@
+agency_id,agency_name,agency_url,agency_timezone,agency_lang,agency_phone,agency_fare_url,agency_email
+SFMTA,San Francisco Municipal Transportation Agency,http://www.sfmta.com,America/Los_Angeles,en,311,https://SFMTA.com/Fares,munifeedback@sfmta.com
