@@ -4,9 +4,10 @@ import pathlib
 import folium
 import geopandas as gpd
 import pandas as pd
+from data_utils import find_data_file
 
 def main() -> None:
-    stops_file = pathlib.Path("data/stops.txt")
+    stops_file = find_data_file("stops.txt")
     stops = pd.read_csv(stops_file)
 
     stops_gdf = gpd.GeoDataFrame(

@@ -1,0 +1,69 @@
+route_id,route_short_name,route_long_name,route_type,vehicle_type,bus_model,weekday_typical_runs,weekday_mean_runs,weekday_min_runs,weekday_max_runs,weekend_typical_runs,weekend_mean_runs,weekend_min_runs,weekend_max_runs
+1,1,CALIFORNIA,3,Bus,Not available in GTFS static files in this directory,381,377.2,229,381,229,229.0,229,229
+12,12,FOLSOM-PACIFIC,3,Bus,Not available in GTFS static files in this directory,170,169.55,152,170,152,152.0,152,152
+14,14,MISSION,3,Bus,Not available in GTFS static files in this directory,270,270.98,270,309,309,309.0,309,309
+14R,14R,MISSION RAPID,3,Bus,Not available in GTFS static files in this directory,255,253.2,183,255,183,183.0,183,183
+15,15,BAYVIEW HUNTERS POINT EXPRESS,3,Bus,Not available in GTFS static files in this directory,158,157.3,130,158,130,130.0,130,130
+18,18,46TH AVENUE,3,Bus,Not available in GTFS static files in this directory,96,96.0,96,96,96,96.0,96,96
+19,19,POLK,3,Bus,Not available in GTFS static files in this directory,134,133.2,102,134,102,102.0,102,102
+1X,1X,CALIFORNIA EXPRESS,3,Bus,Not available in GTFS static files in this directory,8,8.0,8,8,0,0.0,0,0
+2,2,SUTTER,3,Bus,Not available in GTFS static files in this directory,76,76.0,76,76,76,76.0,76,76
+22,22,FILLMORE,3,Bus,Not available in GTFS static files in this directory,359,357.54,305,359,305,305.0,305,305
+23,23,MONTEREY,3,Bus,Not available in GTFS static files in this directory,95,94.19,67,95,67,67.0,67,67
+24,24,DIVISADERO,3,Bus,Not available in GTFS static files in this directory,224,223.45,202,224,202,202.0,202,202
+25,25,TREASURE ISLAND,3,Bus,Not available in GTFS static files in this directory,132,131.45,110,132,110,110.0,110,110
+27,27,BRYANT,3,Bus,Not available in GTFS static files in this directory,120,119.58,103,120,103,103.0,103,103
+28,28,19TH AVENUE,3,Bus,Not available in GTFS static files in this directory,180,179.64,170,180,170,170.0,170,170
+28R,28R,19TH AVENUE RAPID,3,Bus,Not available in GTFS static files in this directory,122,122.0,122,122,0,0.0,0,0
+29,29,SUNSET,3,Bus,Not available in GTFS static files in this directory,229,227.09,166,229,166,166.0,166,166
+30,30,STOCKTON,3,Bus,Not available in GTFS static files in this directory,235,233.92,192,235,192,192.0,192,192
+30X,30X,MARINA EXPRESS,3,Bus,Not available in GTFS static files in this directory,3,3.0,3,3,0,0.0,0,0
+31,31,BALBOA,3,Bus,Not available in GTFS static files in this directory,110,110.0,110,110,110,110.0,110,110
+33,33,ASHBURY-18TH ST,3,Bus,Not available in GTFS static files in this directory,106,105.8,98,106,98,98.0,98,98
+35,35,EUREKA,3,Bus,Not available in GTFS static files in this directory,58,57.98,57,58,57,57.0,57,57
+36,36,TERESITA,3,Bus,Not available in GTFS static files in this directory,67,66.78,58,67,58,58.0,58,58
+37,37,CORBETT,3,Bus,Not available in GTFS static files in this directory,89,88.01,54,89,54,54.0,54,54
+38,38,GEARY,3,Bus,Not available in GTFS static files in this directory,248,247.16,228,248,228,228.0,228,228
+38R,38R,GEARY RAPID,3,Bus,Not available in GTFS static files in this directory,304,300.75,174,304,174,174.0,174,174
+39,39,COIT,3,Bus,Not available in GTFS static files in this directory,62,62.0,62,62,62,62.0,62,62
+43,43,MASONIC,3,Bus,Not available in GTFS static files in this directory,165,163.68,112,165,112,112.0,112,112
+44,44,O'SHAUGHNESSY,3,Bus,Not available in GTFS static files in this directory,218,217.02,188,218,188,188.0,188,188
+45,45,UNION-STOCKTON,3,Bus,Not available in GTFS static files in this directory,202,200.5,142,202,142,142.0,142,142
+48,48,QUINTARA-24TH STREET,3,Bus,Not available in GTFS static files in this directory,177,175.44,128,177,128,128.0,128,128
+49,49,VAN NESS-MISSION,3,Bus,Not available in GTFS static files in this directory,323,321.5,263,323,263,263.0,263,263
+5,5,FULTON,3,Bus,Not available in GTFS static files in this directory,235,237.1,235,319,319,319.0,319,319
+52,52,EXCELSIOR,3,Bus,Not available in GTFS static files in this directory,94,93.1,58,94,58,58.0,58,58
+54,54,FELTON,3,Bus,Not available in GTFS static files in this directory,96,95.86,95,96,95,95.0,95,95
+55,55,DOGPATCH,3,Bus,Not available in GTFS static files in this directory,105,104.98,104,105,104,104.0,104,104
+56,56,RUTLAND,3,Bus,Not available in GTFS static files in this directory,85,85.0,85,85,85,85.0,85,85
+57,57,PARKMERCED,3,Bus,Not available in GTFS static files in this directory,104,103.7,92,104,92,92.0,92,92
+58,58,LAKE MERCED,3,Bus,Not available in GTFS static files in this directory,70,69.9,66,70,66,66.0,66,66
+5R,5R,FULTON RAPID,3,Bus,Not available in GTFS static files in this directory,164,164.0,164,164,0,0.0,0,0
+6,6,HAYES-PARNASSUS,3,Bus,Not available in GTFS static files in this directory,124,123.78,115,124,115,115.0,115,115
+66,66,QUINTARA,3,Bus,Not available in GTFS static files in this directory,100,99.54,86,100,86,86.0,86,86
+67,67,BERNAL HEIGHTS,3,Bus,Not available in GTFS static files in this directory,98,98.0,98,98,98,98.0,98,98
+7,7,HAIGHT-NORIEGA,3,Bus,Not available in GTFS static files in this directory,172,171.62,157,172,157,157.0,157,157
+714,714,BART EARLY BIRD,3,Bus,Not available in GTFS static files in this directory,3,3.0,3,3,0,0.0,0,0
+8,8,BAYSHORE,3,Bus,Not available in GTFS static files in this directory,208,209.12,206,262,262,262.0,262,262
+8AX,8AX,BAYSHORE A EXPRESS,3,Bus,Not available in GTFS static files in this directory,49,49.0,49,49,0,0.0,0,0
+8BX,8BX,BAYSHORE B EXPRESS,3,Bus,Not available in GTFS static files in this directory,43,43.0,43,43,0,0.0,0,0
+9,9,SAN BRUNO,3,Bus,Not available in GTFS static files in this directory,168,168.36,167,187,187,187.0,187,187
+90,90,SAN BRUNO OWL,3,Bus,Not available in GTFS static files in this directory,21,21.0,21,21,21,21.0,21,21
+91,91,3RD-19TH AVE OWL,3,Bus,Not available in GTFS static files in this directory,25,25.0,25,25,25,25.0,25,25
+9R,9R,SAN BRUNO RAPID,3,Bus,Not available in GTFS static files in this directory,119,119.0,119,119,0,0.0,0,0
+CA,CA,CALIFORNIA STREET CABLE CAR,5,Cable Tram,Not available in GTFS static files in this directory,146,146.0,146,146,146,146.0,146,146
+F,F,MARKET & WHARVES,0,Tram/Streetcar,Not available in GTFS static files in this directory,142,142.0,142,142,142,142.0,142,142
+FBUS,FBUS,MARKET & WHARVES BUS,0,Tram/Streetcar,Not available in GTFS static files in this directory,6,6.0,6,6,6,6.0,6,6
+J,J,CHURCH,0,Tram/Streetcar,Not available in GTFS static files in this directory,155,154.95,153,155,153,153.0,153,153
+K,K,INGLESIDE,0,Tram/Streetcar,Not available in GTFS static files in this directory,193,191.82,146,193,146,146.0,146,146
+KBUS,KBUS,INGLESIDE BUS,3,Bus,Not available in GTFS static files in this directory,8,8.4,8,24,24,24.0,24,24
+L,L,TARAVAL,0,Tram/Streetcar,Not available in GTFS static files in this directory,208,207.0,168,208,168,168.0,168,168
+LOWL,LOWL,OWL TARAVAL,3,Bus,Not available in GTFS static files in this directory,33,33.0,33,33,33,33.0,33,33
+M,M,OCEAN VIEW,0,Tram/Streetcar,Not available in GTFS static files in this directory,194,193.45,172,194,172,172.0,172,172
+N,N,JUDAH,0,Tram/Streetcar,Not available in GTFS static files in this directory,229,227.6,173,229,173,173.0,173,173
+NBUS,NBUS,JUDAH BUS,3,Bus,Not available in GTFS static files in this directory,3,3.4,3,19,19,19.0,19,19
+NOWL,NOWL,OWL JUDAH,3,Bus,Not available in GTFS static files in this directory,23,23.0,23,23,23,23.0,23,23
+PH,PH,POWELL-HYDE CABLE CAR,5,Cable Tram,Not available in GTFS static files in this directory,225,225.0,225,225,225,225.0,225,225
+PM,PM,POWELL-MASON CABLE CAR,5,Cable Tram,Not available in GTFS static files in this directory,186,186.0,186,186,186,186.0,186,186
+T,T,THIRD,0,Tram/Streetcar,Not available in GTFS static files in this directory,236,234.42,173,236,173,173.0,173,173
+TBUS,TBUS,THIRD BUS,3,Bus,Not available in GTFS static files in this directory,7,7.38,7,22,22,22.0,22,22

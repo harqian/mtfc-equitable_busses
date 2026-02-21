@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-csv",
-        default="sfmta_data/stops_with_altitude.csv",
+        default="data/sfmta_data/stops_with_altitude.csv",
         help="Output CSV with elevation_m column",
     )
     parser.add_argument(
