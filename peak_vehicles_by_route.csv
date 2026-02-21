@@ -1,0 +1,67 @@
+Route,VehicleType_Existing_2017,VehicleType_2020,VehicleType_2025,VehicleType_2030,AM_Existing_2017,AM_2020,AM_2025,AM_2030,PM_Existing_2017,PM_2020,PM_2025,PM_2030
+1,T Std,T Std,T Std,T Std,28,28,28,28,30,30,30,30
+1AX,M Std,M Artic,M Artic,M Artic,6,6,6,6,5,5,5,5
+1BX,"M Std, M Artic",M Artic,M Artic,M Artic,9,9,9,9,5,5,5,5
+2 short,T Std,T Std,T Std,T Std,5,5,5,5,6,6,6,6
+2,M Std,M Std,M Std,M Std,7,7,7,7,8,8,8,8
+3,T Std,T Std,T Std,T Std,5,5,5,5,6,6,6,6
+5R,"T Std, T Artic",T Artic,T Artic,T Artic,27,27,27,27,20,20,20,20
+5S,M Std,M Std,M Std,M Std,10,10,10,10,10,10,10,10
+6,T Std,T Std,T Std,T Std,12,12,12,12,13,13,13,13
+7,M Std,M Artic,M Artic,M Artic,14,14,14,14,15,15,15,15
+7X,"M Std, M Artic",M Std,M Std,M Std,12,12,12,12,9,9,9,9
+8,M Artic,M Artic,M Artic,M Artic,38,42,42,44,40,44,44,46
+9,M Std,M Std,M Std,M Std,12,12,12,12,12,12,12,12
+9R,M Std,M Artic,M Artic,M Artic,16,16,16,16,16,16,16,16
+10,M Std,M Std,M Std,M Std,10,18,18,18,11,19,19,19
+11,M Std,M Std,M Std,M Std,-,13,13,13,-,13,13,13
+XX,-,M Std,M Std,M Std,-,7,7,7,-,7,7,7
+12,M Std,M Std,M Std,M Std,9,6,6,6,10,7,7,7
+14,T Artic,T Artic,T Artic,T Artic,18,18,18,18,20,20,20,20
+14R,M Artic,M Artic,M Artic,M Artic,17,17,20,20,17,17,20,20
+14X,M Artic,M Artic,M Artic,M Artic,10,10,10,10,10,10,10,10
+18,M Std,M Std,M Std,M Std,4,4,4,4,4,4,4,4
+19,M Std,M Std,M Std,M Std,10,12,16,16,10,12,16,16
+21,T Std,T Std,T Std,T Std,12,15,15,15,12,12,12,12
+22,T Std,"T Std, T Artic","T Std, T Artic","T Std, T Artic",17,21,21,21,19,23,23,23
+23,M Std,M Std,M Std,M Std,5,5,7,7,6,6,8,8
+24,T Std,T Std,T Std,T Std,15,15,15,25,15,15,15,25
+25,M Std,M Std,M Artic,M Artic,4,4,5,5,4,4,6,6
+27,M Std,M Std,M Std,M Std,8,8,8,8,8,8,8,8
+28,M Std,M Std,M Std,M Std,14,16,16,16,15,17,17,17
+28R,M Std,M Std,M Std,M Artic,11,11,19,23,11,11,19,23
+29,M Std,M Std,M Std,M Std,20,21,28,28,18,19,26,26
+30,"T Std, T Artic","T Std, T Artic","T Std, T Artic","T Std, T Artic",14,13,13,13,25,16,16,16
+30X,M Artic,M Artic,M Artic,M Artic,11,11,11,11,7,7,7,7
+31,T Std,T Std,T Std,T Std,11,11,11,11,12,12,12,12
+31AX,M Std,M Std,M Std,M Std,6,6,6,6,5,5,5,5
+31BX,M Std,M Std,M Std,M Std,6,6,6,6,5,5,5,5
+33,T Std,T Std,T Std,T Std,9,9,9,9,9,9,9,9
+35,M Short,M Short,M Short,M Short,2,2,2,2,3,3,3,3
+36,M Short,M Short,M Short,M Short,3,3,3,3,3,3,3,3
+37,M Short,M Short,M Short,M Short,4,4,4,4,5,5,5,5
+38,M Artic,M Artic,M Artic,M Artic,15,15,19,19,16,16,21,21
+38R,M Artic,M Artic,M Artic,M Artic,25,31,31,31,30,36,36,36
+38AX,M Std,M Artic,M Artic,M Artic,6,6,15,15,6,6,15,15
+38BX,M Std,M Std,-,-,6,6,-,-,6,6,-,-
+39,M Short,M Short,M Short,M Short,2,2,2,2,2,2,2,2
+41,T Std,T Std,T Std,T Std,15,15,15,15,11,11,11,11
+43,M Std,M Std,M Std,M Std,22,22,22,22,19,19,19,19
+44,M Std,M Std,M Std,M Artic,23,23,25,25,19,19,21,21
+45,T Std,T Std,T Std,T Std,13,12,12,12,9,12,12,12
+47,M Std,M Artic,M Artic,M Artic,15,15,15,15,17,17,17,17
+48,M Std,M Std,M Std,M Std,13,13,13,13,12,12,12,12
+49,M Artic,T Artic,T Artic,T Artic,18,18,18,18,21,21,21,21
+"52","M Short, M Std","M Short, M Std","M Short, M Std","M Short, M Std",4,4,4,4,4,4,4,4
+54,M Std,M Std,M Std,M Std,8,8,8,8,8,8,8,8
+55,M Std,-,-,-,3,-,-,-,3,-,-,-
+56,M Short,M Short,M Short,M Short,1,3,1,1,1,3,1,1
+57,M Std,"M Short, M Std","M Short, M Std","M Short, M Std",5,5,5,5,5,5,5,5
+66,M Std,M Std,M Std,M Std,2,2,2,2,2,2,2,2
+67,"M Short, M Std","M Short, M Std","M Short, M Std","M Short, M Std",2,2,2,2,2,2,2,2
+81X/82X,M Std,M Std,M Std,M Std,3,3,3,3,2,2,2,2
+83X,M Std,-,-,-,2,-,-,-,2,-,-,-
+88,M Std,-,-,-,1,-,-,-,1,-,-,-
+NX,M Std,M Std,M Std,M Std,9,9,9,9,8,8,8,8
+CPX,M Std,M Std,M Artic,M Artic,-,8,8,8,-,8,8,8
+HPX,-,-,M Std,M Std,-,-,10,14,-,-,10,14
