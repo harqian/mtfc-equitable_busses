@@ -47,9 +47,7 @@ def main() -> None:
     shapes = pd.read_csv(find_data_file('shapes.txt'))
     hospitals = pd.read_csv(find_data_file('hospitals.csv'))
     
-    # Load hospitals data
     hospital_coords = hospitals["Location"].str.extract(r"\(([-\d.]+),\s*([-\d.]+)\)").astype(float)
-    # hospitals.csv stores "(lat, lon)", so x must come from column 1 and y from column 0.
     hospital_geometry = gpd.points_from_xy(hospital_coords[1], hospital_coords[0])
 
     hospitals_gdf = gpd.GeoDataFrame(

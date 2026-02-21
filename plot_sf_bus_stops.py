@@ -19,7 +19,6 @@ def main() -> None:
         "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/san-francisco.geojson"
     ).to_crs("EPSG:4326")
 
-    # Merge all sub-polygons into one geometry so only the external city edge is drawn.
     sf_outer = gpd.GeoSeries([sf.geometry.union_all()], crs=sf.crs)
 
     center = sf_outer.iloc[0].centroid
