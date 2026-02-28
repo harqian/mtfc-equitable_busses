@@ -1,0 +1,56 @@
+{
+  "reporting_constants": {
+    "annual_fare_revenue": {
+      "value": 210000000.0,
+      "label": "Placeholder FY assumption for reporting only"
+    },
+    "annual_advertising_revenue": {
+      "value": 18000000.0,
+      "label": "Placeholder FY assumption for reporting only"
+    },
+    "annual_external_subsidies": {
+      "value": 320000000.0,
+      "label": "Placeholder FY assumption for reporting only"
+    },
+    "annual_budget_ceiling": {
+      "value": 780000000.0,
+      "label": "Placeholder FY operating budget ceiling for reporting only"
+    }
+  },
+  "operating_cost_parameters": {
+    "labor_cost_per_vehicle_hour": {
+      "value": 185.0,
+      "label": "Placeholder blended labor rate pending route-hour estimation"
+    },
+    "maintenance_cost_per_vehicle_mile": {
+      "value": 5.25,
+      "label": "Placeholder maintenance rate pending route-mile estimation"
+    },
+    "energy_cost_per_vehicle_mile": {
+      "value": 1.35,
+      "label": "Placeholder fuel-energy rate pending route-mile estimation"
+    },
+    "annualized_capital_cost_per_vehicle": {
+      "value": 145000.0,
+      "label": "Placeholder annualized capital proxy per additional bus"
+    }
+  },
+  "estimation_assumptions": {
+    "average_operating_speed_mph": {
+      "value": 9.5,
+      "label": "Placeholder average in-service speed for later route-hour estimation"
+    },
+    "deadhead_multiplier": {
+      "value": 1.08,
+      "label": "Placeholder deadhead uplift for later route-mile estimation"
+    },
+    "dwell_recovery_multiplier": {
+      "value": 1.15,
+      "label": "Placeholder dwell-recovery uplift for later route-hour estimation"
+    },
+    "weekday_service_days_per_year": {
+      "value": 260.0,
+      "label": "Weekday-only service assumption for later annualization"
+    }
+  }
+}
