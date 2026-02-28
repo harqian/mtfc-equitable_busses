@@ -6,15 +6,18 @@ from pathlib import Path
 
 from model import (
     SearchConfig,
+    _load_weekday_ridership,
     apply_move,
     canonical_move_key,
     compute_cost_breakdown,
+    compute_emissions_breakdown,
+    compute_objective_breakdown,
     compute_sa_acceptance_probability,
     decay_tenures,
     has_global_fleet_conservation,
     is_feasible_solution,
     is_within_route_bounds,
-    load_cost_parameters,
+    load_parameters,
     load_route_fleet_domain,
     make_add_move,
     make_drop_move,
@@ -42,13 +45,21 @@ R1,1,One,1,10,2
 R2,2,Two,2,4,2
 """
 
-PHASE2_ROUTE_STOPS_FIXTURE = """route_id,direction_id,route_stop_order,stop_lat,stop_lon
-R1,0,1,0.0,0.0
-R1,0,2,0.0,1.0
-R1,1,1,0.0,1.0
-R1,1,2,0.0,0.0
-R2,0,1,0.0,0.0
-R2,0,2,1.0,0.0
+PHASE2_ROUTE_STOPS_FIXTURE = """route_id,direction_id,route_stop_order,stop_lat,stop_lon,elevation_m
+R1,0,1,0.0,0.0,0.0
+R1,0,2,0.0,1.0,1609.344
+R1,1,1,0.0,1.0,1609.344
+R1,1,2,0.0,0.0,0.0
+R2,0,1,0.0,0.0,
+R2,0,2,1.0,0.0,100.0
+"""
+
+PHASE3_RIDERSHIP_FIXTURE = """Month,Route,Service Category,Service Day of the Week,Average Daily Boardings
+January 2024,1 One,Local,Weekday,"1,000"
+February 2024,1 One,Local,Weekday,"1,500"
+January 2024,2 Two,Local,Weekday,"200"
+February 2024,2 Two,Local,Weekday,"250"
+January 2024,1 One,Local,Saturday,"700"
 """
 
 
@@ -57,8 +68,8 @@ class TestRouteFleetPrimitives(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.csv_path = Path(self.tempdir.name) / "simplified_bus_routes.csv"
         self.csv_path.write_text(CSV_FIXTURE, encoding="utf-8")
-        self.cost_params_path = Path(self.tempdir.name) / "cost_parameters.json"
-        self.cost_params_path.write_text(
+        self.parameters_path = Path(self.tempdir.name) / "parameters.json"
+        self.parameters_path.write_text(
             json.dumps(
                 {
                     "reporting_constants": {
@@ -79,12 +90,25 @@ class TestRouteFleetPrimitives(unittest.TestCase):
                         "dwell_recovery_multiplier": {"value": 1.2, "label": "dwell"},
                         "weekday_service_days_per_year": {"value": 260.0, "label": "days"},
                     },
+                    "emissions_parameters": {
+                        "car_emissions_grams_per_mile": {"value": 353.802111, "label": "car"},
+                        "car_ownership_probability": {"value": 0.7, "label": "ownership"},
+                        "bus_base_emissions_grams_per_mile": {"value": 2830.0, "label": "bus base"},
+                        "bus_climb_penalty_grams_per_mile": {"value": 5660.0, "label": "bus climb"},
+                    },
+                    "objective_weights": {
+                        "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
+                        "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                    },
+                    "ridership_assumptions": {
+                        "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
+                    },
                 }
             ),
             encoding="utf-8",
         )
         self.domain = load_route_fleet_domain(self.csv_path)
-        self.cost_params = load_cost_parameters(self.cost_params_path)
+        self.parameters = load_parameters(self.parameters_path)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -96,22 +120,24 @@ class TestRouteFleetPrimitives(unittest.TestCase):
         self.assertEqual(self.domain.upper_bounds, (15, 13, 12))
 
     def test_cost_parameter_loader_validates_schema(self) -> None:
-        loaded = load_cost_parameters(self.cost_params_path)
+        loaded = load_parameters(self.parameters_path)
         self.assertEqual(loaded.reporting_constants.annual_fare_revenue.value, 1.0)
         self.assertEqual(loaded.operating_cost_parameters.annualized_capital_cost_per_vehicle.label, "capital")
+        self.assertEqual(loaded.emissions_parameters.car_emissions_grams_per_mile.value, 353.802111)
+        self.assertEqual(loaded.objective_weights.cost_percent_change_coefficient.value, 1.0)
 
-        bad_path = Path(self.tempdir.name) / "bad_cost_parameters.json"
+        bad_path = Path(self.tempdir.name) / "bad_parameters.json"
         bad_path.write_text(
             json.dumps({"reporting_constants": {}, "operating_cost_parameters": {}}),
             encoding="utf-8",
         )
         with self.assertRaises(ValueError):
-            load_cost_parameters(bad_path)
+            load_parameters(bad_path)
 
     def test_objective_is_finite_and_deterministic_for_valid_vector(self) -> None:
         y = (5, 3, 2)
-        obj1 = objective_function(y, domain=self.domain)
-        obj2 = objective_function(y, domain=self.domain)
+        obj1 = objective_function(y, domain=self.domain, parameters=self.parameters)
+        obj2 = objective_function(y, domain=self.domain, parameters=self.parameters)
         self.assertTrue(math.isfinite(obj1))
         self.assertEqual(obj1, obj2)
         self.assertEqual(obj1, 0.0)
@@ -130,12 +156,12 @@ class TestRouteFleetPrimitives(unittest.TestCase):
         baseline_breakdown = compute_cost_breakdown(
             self.domain.baseline,
             domain=self.domain,
-            cost_parameters=self.cost_params,
+            parameters=self.parameters,
         )
         expanded_breakdown = compute_cost_breakdown(
             (6, 3, 2),
             domain=self.domain,
-            cost_parameters=self.cost_params,
+            parameters=self.parameters,
         )
 
         self.assertEqual(baseline_breakdown.objective_cost, 0.0)
@@ -143,6 +169,24 @@ class TestRouteFleetPrimitives(unittest.TestCase):
         self.assertEqual(len(baseline_breakdown.route_breakdowns), len(self.domain.route_ids))
         self.assertEqual(expanded_breakdown.net_new_fleet, 1)
         self.assertTrue(all(route.annual_total_cost == 0.0 for route in baseline_breakdown.route_breakdowns))
+
+    def test_emissions_and_objective_breakdowns_are_structured(self) -> None:
+        baseline_emissions = compute_emissions_breakdown(
+            self.domain.baseline,
+            domain=self.domain,
+            parameters=self.parameters,
+        )
+        expanded_objective = compute_objective_breakdown(
+            (6, 3, 2),
+            domain=self.domain,
+            parameters=self.parameters,
+        )
+
+        self.assertEqual(len(baseline_emissions.route_breakdowns), len(self.domain.route_ids))
+        self.assertEqual(baseline_emissions.candidate_total_emissions_grams, 0.0)
+        self.assertEqual(expanded_objective.cost.baseline_value, 0.0)
+        self.assertGreater(expanded_objective.cost.current_value, 0.0)
+        self.assertGreater(expanded_objective.total_combined_objective, 0.0)
 
     def test_feasibility_checks_bounds_and_fleet_conservation(self) -> None:
         baseline = self.domain.baseline
@@ -225,9 +269,10 @@ class TestSearchLoopBehavior(unittest.TestCase):
         self.assertLessEqual(result.best_objective, result.initial_objective + 1e-9)
         self.assertEqual(result.iterations_completed, 40)
         self.assertEqual(len(result.events), 40)
-        self.assertEqual(result.initial_cost_breakdown.objective_cost, result.initial_objective)
-        self.assertEqual(result.best_cost_breakdown.objective_cost, result.best_objective)
+        self.assertEqual(result.initial_objective_breakdown.total_combined_objective, result.initial_objective)
+        self.assertEqual(result.best_objective_breakdown.total_combined_objective, result.best_objective)
         self.assertEqual(len(result.best_cost_breakdown.route_breakdowns), len(self.domain.route_ids))
+        self.assertEqual(len(result.best_emissions_breakdown.route_breakdowns), len(self.domain.route_ids))
         self.assertEqual(result.best_budget_slack, result.best_cost_breakdown.annual_budget_slack)
         self.assertEqual(result.initial_budget_slack, result.initial_cost_breakdown.annual_budget_slack)
         self.assertAlmostEqual(
@@ -235,6 +280,7 @@ class TestSearchLoopBehavior(unittest.TestCase):
             result.best_cost_breakdown.annual_total_cost - result.initial_cost_breakdown.annual_total_cost,
         )
         self.assertFalse(result.route_cost_delta_table.empty)
+        self.assertFalse(result.route_emissions_delta_table.empty)
 
     def test_seeded_runs_are_deterministic(self) -> None:
         config = SearchConfig(max_iterations=25, nbhd_add_lim=6, nbhd_drop_lim=6, nbhd_swap_lim=12)
@@ -262,10 +308,10 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.routes_path = Path(self.tempdir.name) / "routes.csv"
         self.route_stops_path = Path(self.tempdir.name) / "route_stops.csv"
-        self.cost_params_path = Path(self.tempdir.name) / "cost_parameters.json"
+        self.parameters_path = Path(self.tempdir.name) / "parameters.json"
         self.routes_path.write_text(PHASE2_ROUTE_FIXTURE, encoding="utf-8")
         self.route_stops_path.write_text(PHASE2_ROUTE_STOPS_FIXTURE, encoding="utf-8")
-        self.cost_params_path.write_text(
+        self.parameters_path.write_text(
             json.dumps(
                 {
                     "reporting_constants": {
@@ -286,11 +332,24 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
                         "dwell_recovery_multiplier": {"value": 1.0, "label": "dwell"},
                         "weekday_service_days_per_year": {"value": 1.0, "label": "days"},
                     },
+                    "emissions_parameters": {
+                        "car_emissions_grams_per_mile": {"value": 353.802111, "label": "car"},
+                        "car_ownership_probability": {"value": 0.7, "label": "ownership"},
+                        "bus_base_emissions_grams_per_mile": {"value": 2830.0, "label": "bus base"},
+                        "bus_climb_penalty_grams_per_mile": {"value": 5660.0, "label": "bus climb"},
+                    },
+                    "objective_weights": {
+                        "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
+                        "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                    },
+                    "ridership_assumptions": {
+                        "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
+                    },
                 }
             ),
             encoding="utf-8",
         )
-        self.cost_params = load_cost_parameters(self.cost_params_path)
+        self.parameters = load_parameters(self.parameters_path)
         self.domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
 
     def tearDown(self) -> None:
@@ -301,25 +360,44 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
 
         self.assertEqual(self.domain.route_driver_estimates, domain2.route_driver_estimates)
         r1 = self.domain.route_driver_estimates[0]
-        self.assertAlmostEqual(r1.one_way_distance_miles, 69.093, places=2)
-        self.assertAlmostEqual(r1.round_trip_distance_miles, 138.186, places=2)
+        self.assertAlmostEqual(r1.horizontal_one_way_distance_miles, 69.093, places=2)
+        self.assertAlmostEqual(r1.horizontal_round_trip_distance_miles, 138.186, places=2)
+        self.assertAlmostEqual(r1.one_way_distance_miles, r1.horizontal_one_way_distance_miles, places=6)
+        self.assertAlmostEqual(r1.round_trip_distance_miles, r1.horizontal_round_trip_distance_miles, places=6)
+        self.assertGreater(r1.three_d_one_way_distance_miles, r1.horizontal_one_way_distance_miles)
+        self.assertGreater(r1.three_d_round_trip_distance_miles, r1.horizontal_round_trip_distance_miles)
+        self.assertAlmostEqual(r1.uphill_gain_one_way_miles, 0.5, places=3)
+        self.assertAlmostEqual(r1.uphill_gain_round_trip_miles, 1.0, places=3)
+        self.assertGreater(r1.uphill_gain_round_trip_feet, 0.0)
+        self.assertNotEqual(r1.vehicle_type_category, "unknown")
 
     def test_vehicle_miles_and_hours_are_finite_and_non_negative(self) -> None:
-        breakdown = compute_cost_breakdown(self.domain.baseline, domain=self.domain, cost_parameters=self.cost_params)
+        breakdown = compute_cost_breakdown(self.domain.baseline, domain=self.domain, parameters=self.parameters)
 
         self.assertTrue(math.isfinite(breakdown.annual_total_cost))
-        for route in breakdown.route_breakdowns:
+        for route_driver, route in zip(self.domain.route_driver_estimates, breakdown.route_breakdowns):
             self.assertGreaterEqual(route.baseline_annual_vehicle_miles, 0.0)
             self.assertGreaterEqual(route.candidate_annual_vehicle_miles, 0.0)
             self.assertGreaterEqual(route.baseline_annual_vehicle_hours, 0.0)
             self.assertGreaterEqual(route.candidate_annual_vehicle_hours, 0.0)
             self.assertTrue(math.isfinite(route.candidate_annual_vehicle_miles))
             self.assertTrue(math.isfinite(route.candidate_annual_vehicle_hours))
+            self.assertGreaterEqual(route_driver.horizontal_one_way_distance_miles, 0.0)
+            self.assertGreaterEqual(route_driver.three_d_one_way_distance_miles, route_driver.horizontal_one_way_distance_miles)
+            self.assertGreaterEqual(route_driver.uphill_gain_one_way_miles, 0.0)
+
+    def test_missing_elevation_rows_do_not_crash_and_emit_notes(self) -> None:
+        r2 = self.domain.route_driver_estimates[1]
+
+        self.assertAlmostEqual(r2.three_d_one_way_distance_miles, r2.horizontal_one_way_distance_miles, places=6)
+        self.assertEqual(r2.uphill_gain_round_trip_miles, 0.0)
+        self.assertTrue(any("Missing stop elevations were treated as zero elevation change" in note for note in r2.notes))
+        self.assertEqual(r2.vehicle_type_source, "peak_vehicles_by_route.csv:VehicleType_2025")
 
     def test_candidate_vectors_change_costs_monotonically(self) -> None:
-        baseline = compute_cost_breakdown((1, 2), domain=self.domain, cost_parameters=self.cost_params)
-        expanded = compute_cost_breakdown((2, 2), domain=self.domain, cost_parameters=self.cost_params)
-        reduced = compute_cost_breakdown((0, 2), domain=self.domain, cost_parameters=self.cost_params)
+        baseline = compute_cost_breakdown((1, 2), domain=self.domain, parameters=self.parameters)
+        expanded = compute_cost_breakdown((2, 2), domain=self.domain, parameters=self.parameters)
+        reduced = compute_cost_breakdown((0, 2), domain=self.domain, parameters=self.parameters)
 
         base_r1 = baseline.route_breakdowns[0]
         exp_r1 = expanded.route_breakdowns[0]
@@ -337,8 +415,8 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.routes_path = Path(self.tempdir.name) / "routes.csv"
         self.route_stops_path = Path(self.tempdir.name) / "route_stops.csv"
-        self.cost_params_path = Path(self.tempdir.name) / "cost_parameters.json"
-        self.alt_cost_params_path = Path(self.tempdir.name) / "alt_cost_parameters.json"
+        self.parameters_path = Path(self.tempdir.name) / "parameters.json"
+        self.alt_parameters_path = Path(self.tempdir.name) / "alt_parameters.json"
         self.routes_path.write_text(PHASE2_ROUTE_FIXTURE, encoding="utf-8")
         self.route_stops_path.write_text(PHASE2_ROUTE_STOPS_FIXTURE, encoding="utf-8")
 
@@ -361,30 +439,43 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
                 "dwell_recovery_multiplier": {"value": 1.0, "label": "dwell"},
                 "weekday_service_days_per_year": {"value": 1.0, "label": "days"},
             },
+            "emissions_parameters": {
+                "car_emissions_grams_per_mile": {"value": 353.802111, "label": "car"},
+                "car_ownership_probability": {"value": 0.7, "label": "ownership"},
+                "bus_base_emissions_grams_per_mile": {"value": 2830.0, "label": "bus base"},
+                "bus_climb_penalty_grams_per_mile": {"value": 5660.0, "label": "bus climb"},
+            },
+            "objective_weights": {
+                "cost_percent_change_coefficient": {"value": 2.0, "label": "cost weight"},
+                "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+            },
+            "ridership_assumptions": {
+                "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
+            },
         }
         alt_payload = json.loads(json.dumps(base_payload))
         alt_payload["reporting_constants"]["annual_fare_revenue"]["value"] = 999999.0
         alt_payload["reporting_constants"]["annual_advertising_revenue"]["value"] = 888888.0
         alt_payload["reporting_constants"]["annual_external_subsidies"]["value"] = 777777.0
 
-        self.cost_params_path.write_text(json.dumps(base_payload), encoding="utf-8")
-        self.alt_cost_params_path.write_text(json.dumps(alt_payload), encoding="utf-8")
-        self.cost_params = load_cost_parameters(self.cost_params_path)
-        self.alt_cost_params = load_cost_parameters(self.alt_cost_params_path)
+        self.parameters_path.write_text(json.dumps(base_payload), encoding="utf-8")
+        self.alt_parameters_path.write_text(json.dumps(alt_payload), encoding="utf-8")
+        self.parameters = load_parameters(self.parameters_path)
+        self.alt_parameters = load_parameters(self.alt_parameters_path)
         self.domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
     def test_reporting_constants_do_not_change_objective_ranking(self) -> None:
-        baseline = compute_cost_breakdown((1, 2), domain=self.domain, cost_parameters=self.cost_params)
-        baseline_alt = compute_cost_breakdown((1, 2), domain=self.domain, cost_parameters=self.alt_cost_params)
+        baseline = compute_cost_breakdown((1, 2), domain=self.domain, parameters=self.parameters)
+        baseline_alt = compute_cost_breakdown((1, 2), domain=self.domain, parameters=self.alt_parameters)
 
         self.assertEqual(baseline.objective_cost, baseline_alt.objective_cost)
         self.assertNotEqual(baseline.annual_total_revenue, baseline_alt.annual_total_revenue)
 
     def test_global_fleet_conservation_keeps_capital_cost_at_zero_for_swaps(self) -> None:
-        swapped = compute_cost_breakdown((0, 3), domain=self.domain, cost_parameters=self.cost_params)
+        swapped = compute_cost_breakdown((0, 3), domain=self.domain, parameters=self.parameters)
 
         self.assertEqual(sum((0, 3)), sum(self.domain.baseline))
         self.assertEqual(swapped.net_new_fleet, 0)
@@ -398,6 +489,7 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
         )
 
         self.assertIn("delta_total_cost", result.route_cost_delta_table.columns)
+        self.assertIn("delta_net_emissions_grams", result.route_emissions_delta_table.columns)
         self.assertAlmostEqual(
             result.route_cost_delta_table["delta_total_cost"].sum(),
             result.annual_cost_delta_vs_baseline,
@@ -407,9 +499,32 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             result.best_cost_breakdown.reporting_constants.annual_budget_ceiling.value
             - result.best_cost_breakdown.annual_total_cost,
         )
+        self.assertAlmostEqual(
+            result.best_objective_breakdown.total_combined_objective,
+            result.best_objective_breakdown.cost.weighted_contribution
+            + result.best_objective_breakdown.emissions.weighted_contribution,
+        )
 
-    def test_search_uses_supplied_cost_parameters_for_objective(self) -> None:
-        fast_params_payload = {
+    def test_negative_baseline_emissions_keep_percent_delta_sign_aligned_with_worse_outcomes(self) -> None:
+        baseline = compute_objective_breakdown(
+            (1, 2),
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership={"1": 10000.0, "2": 10000.0},
+        )
+        worsened = compute_objective_breakdown(
+            (0, 2),
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership={"1": 10000.0, "2": 10000.0},
+        )
+
+        self.assertLess(baseline.emissions.baseline_value, 0.0)
+        self.assertGreater(worsened.emissions.absolute_delta, 0.0)
+        self.assertGreater(worsened.emissions.percent_delta, 0.0)
+
+    def test_search_uses_supplied_parameters_for_objective(self) -> None:
+        fast_parameters_payload = {
             "reporting_constants": {
                 "annual_fare_revenue": {"value": 100.0, "label": "fare"},
                 "annual_advertising_revenue": {"value": 20.0, "label": "ads"},
@@ -428,27 +543,173 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
                 "dwell_recovery_multiplier": {"value": 1.0, "label": "dwell"},
                 "weekday_service_days_per_year": {"value": 1.0, "label": "days"},
             },
+            "emissions_parameters": {
+                "car_emissions_grams_per_mile": {"value": 353.802111, "label": "car"},
+                "car_ownership_probability": {"value": 0.7, "label": "ownership"},
+                "bus_base_emissions_grams_per_mile": {"value": 2830.0, "label": "bus base"},
+                "bus_climb_penalty_grams_per_mile": {"value": 5660.0, "label": "bus climb"},
+            },
+            "objective_weights": {
+                "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
+                "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+            },
+            "ridership_assumptions": {
+                "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
+            },
         }
-        fast_path = Path(self.tempdir.name) / "fast_cost_parameters.json"
-        fast_path.write_text(json.dumps(fast_params_payload), encoding="utf-8")
-        fast_params = load_cost_parameters(fast_path)
+        fast_path = Path(self.tempdir.name) / "fast_parameters.json"
+        fast_path.write_text(json.dumps(fast_parameters_payload), encoding="utf-8")
+        fast_parameters = load_parameters(fast_path)
 
         default_result = run_route_fleet_search(
             domain=self.domain,
             config=SearchConfig(max_iterations=5, nbhd_add_lim=4, nbhd_drop_lim=4, nbhd_swap_lim=6),
             seed=3,
-            cost_parameters=self.cost_params,
+            parameters=self.parameters,
         )
         fast_result = run_route_fleet_search(
             domain=self.domain,
             config=SearchConfig(max_iterations=5, nbhd_add_lim=4, nbhd_drop_lim=4, nbhd_swap_lim=6),
             seed=3,
-            cost_parameters=fast_params,
+            parameters=fast_parameters,
         )
 
-        self.assertNotEqual(default_result.initial_objective, fast_result.initial_objective)
-        self.assertEqual(default_result.initial_objective, default_result.initial_cost_breakdown.objective_cost)
-        self.assertEqual(fast_result.initial_objective, fast_result.initial_cost_breakdown.objective_cost)
+        default_candidate_objective = objective_function(
+            (0, 3),
+            domain=self.domain,
+            parameters=self.parameters,
+        )
+        fast_candidate_objective = objective_function(
+            (0, 3),
+            domain=self.domain,
+            parameters=fast_parameters,
+        )
+
+        self.assertNotEqual(default_candidate_objective, fast_candidate_objective)
+        self.assertEqual(
+            default_result.initial_objective,
+            default_result.initial_objective_breakdown.total_combined_objective,
+        )
+        self.assertEqual(
+            fast_result.initial_objective,
+            fast_result.initial_objective_breakdown.total_combined_objective,
+        )
+
+
+class TestPhaseThreeEmissionsCalculations(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.routes_path = Path(self.tempdir.name) / "routes.csv"
+        self.route_stops_path = Path(self.tempdir.name) / "route_stops.csv"
+        self.parameters_path = Path(self.tempdir.name) / "parameters.json"
+        self.ridership_path = Path(self.tempdir.name) / "ridership.csv"
+        self.routes_path.write_text(PHASE2_ROUTE_FIXTURE, encoding="utf-8")
+        self.route_stops_path.write_text(PHASE2_ROUTE_STOPS_FIXTURE, encoding="utf-8")
+        self.ridership_path.write_text(PHASE3_RIDERSHIP_FIXTURE, encoding="utf-8")
+        self.parameters_path.write_text(
+            json.dumps(
+                {
+                    "reporting_constants": {
+                        "annual_fare_revenue": {"value": 100.0, "label": "fare"},
+                        "annual_advertising_revenue": {"value": 20.0, "label": "ads"},
+                        "annual_external_subsidies": {"value": 30.0, "label": "subsidy"},
+                        "annual_budget_ceiling": {"value": 10000.0, "label": "budget"},
+                    },
+                    "operating_cost_parameters": {
+                        "labor_cost_per_vehicle_hour": {"value": 10.0, "label": "labor"},
+                        "maintenance_cost_per_vehicle_mile": {"value": 2.0, "label": "maintenance"},
+                        "energy_cost_per_vehicle_mile": {"value": 1.0, "label": "energy"},
+                        "annualized_capital_cost_per_vehicle": {"value": 500.0, "label": "capital"},
+                    },
+                    "estimation_assumptions": {
+                        "average_operating_speed_mph": {"value": 10.0, "label": "speed"},
+                        "deadhead_multiplier": {"value": 1.0, "label": "deadhead"},
+                        "dwell_recovery_multiplier": {"value": 1.0, "label": "dwell"},
+                        "weekday_service_days_per_year": {"value": 10.0, "label": "days"},
+                    },
+                    "emissions_parameters": {
+                        "car_emissions_grams_per_mile": {"value": 100.0, "label": "car"},
+                        "car_ownership_probability": {"value": 0.5, "label": "ownership"},
+                        "bus_base_emissions_grams_per_mile": {"value": 1000.0, "label": "bus base"},
+                        "bus_climb_penalty_grams_per_mile": {"value": 500.0, "label": "bus climb"},
+                    },
+                    "objective_weights": {
+                        "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
+                        "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                    },
+                    "ridership_assumptions": {
+                        "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.parameters = load_parameters(self.parameters_path)
+        self.domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
+        self.weekday_ridership = _load_weekday_ridership(self.ridership_path)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_weekday_ridership_loader_uses_latest_values(self) -> None:
+        self.assertEqual(self.weekday_ridership["1"], 1500.0)
+        self.assertEqual(self.weekday_ridership["2"], 250.0)
+
+    def test_baseline_and_candidate_emissions_are_finite(self) -> None:
+        breakdown = compute_emissions_breakdown(
+            self.domain.baseline,
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership=self.weekday_ridership,
+        )
+
+        self.assertTrue(math.isfinite(breakdown.baseline_total_emissions_grams))
+        self.assertTrue(math.isfinite(breakdown.candidate_total_emissions_grams))
+        for route in breakdown.route_breakdowns:
+            self.assertTrue(math.isfinite(route.baseline_net_emissions_grams))
+            self.assertTrue(math.isfinite(route.candidate_net_emissions_grams))
+
+    def test_increasing_service_increases_bus_emissions_and_avoided_rider_emissions(self) -> None:
+        baseline = compute_emissions_breakdown(
+            (1, 2),
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership=self.weekday_ridership,
+        )
+        expanded = compute_emissions_breakdown(
+            (2, 2),
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership=self.weekday_ridership,
+        )
+
+        base_r1 = baseline.route_breakdowns[0]
+        exp_r1 = expanded.route_breakdowns[0]
+
+        self.assertGreater(exp_r1.candidate_bus_emissions_grams, base_r1.candidate_bus_emissions_grams)
+        self.assertGreater(exp_r1.candidate_rider_emissions_avoided_grams, base_r1.candidate_rider_emissions_avoided_grams)
+        self.assertGreater(exp_r1.candidate_riders, base_r1.candidate_riders)
+
+    def test_net_emissions_aggregate_exactly_from_routes(self) -> None:
+        breakdown = compute_emissions_breakdown(
+            (2, 1),
+            domain=self.domain,
+            parameters=self.parameters,
+            weekday_ridership=self.weekday_ridership,
+        )
+
+        self.assertAlmostEqual(
+            breakdown.baseline_total_emissions_grams,
+            sum(route.baseline_net_emissions_grams for route in breakdown.route_breakdowns),
+        )
+        self.assertAlmostEqual(
+            breakdown.candidate_total_emissions_grams,
+            sum(route.candidate_net_emissions_grams for route in breakdown.route_breakdowns),
+        )
+        self.assertAlmostEqual(
+            breakdown.absolute_delta_emissions_grams,
+            breakdown.candidate_total_emissions_grams - breakdown.baseline_total_emissions_grams,
+        )
 
 
 if __name__ == "__main__":

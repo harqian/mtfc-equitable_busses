@@ -3,6 +3,7 @@ import json
 import math
 import pathlib
 import random
+import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -47,6 +48,28 @@ class CostParameters:
     reporting_constants: ReportingConstants
     operating_cost_parameters: OperatingCostParameters
     estimation_assumptions: EstimationAssumptions
+    emissions_parameters: "EmissionsParameters"
+    objective_weights: "ObjectiveWeights"
+    ridership_assumptions: "RidershipAssumptions"
+
+
+@dataclass(frozen=True)
+class EmissionsParameters:
+    car_emissions_grams_per_mile: ParameterValue
+    car_ownership_probability: ParameterValue
+    bus_base_emissions_grams_per_mile: ParameterValue
+    bus_climb_penalty_grams_per_mile: ParameterValue
+
+
+@dataclass(frozen=True)
+class ObjectiveWeights:
+    cost_percent_change_coefficient: ParameterValue
+    emissions_percent_change_coefficient: ParameterValue
+
+
+@dataclass(frozen=True)
+class RidershipAssumptions:
+    route_average_trip_fraction: ParameterValue
 
 
 @dataclass(frozen=True)
@@ -97,10 +120,15 @@ class SearchResult:
     best_route_table: pd.DataFrame
     initial_cost_breakdown: "SystemCostBreakdown"
     best_cost_breakdown: "SystemCostBreakdown"
+    initial_emissions_breakdown: "SystemEmissionsBreakdown"
+    best_emissions_breakdown: "SystemEmissionsBreakdown"
+    initial_objective_breakdown: "ObjectiveBreakdown"
+    best_objective_breakdown: "ObjectiveBreakdown"
     annual_cost_delta_vs_baseline: float
     initial_budget_slack: float
     best_budget_slack: float
     route_cost_delta_table: pd.DataFrame
+    route_emissions_delta_table: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -152,6 +180,56 @@ class SystemCostBreakdown:
 
 
 @dataclass(frozen=True)
+class RouteEmissionsBreakdown:
+    route_id: str
+    baseline_fleet: int
+    candidate_fleet: int
+    fleet_delta: int
+    service_scale: float
+    baseline_riders: float
+    candidate_riders: float
+    average_rider_trip_distance_miles: float
+    baseline_bus_emissions_grams: float
+    candidate_bus_emissions_grams: float
+    baseline_rider_emissions_avoided_grams: float
+    candidate_rider_emissions_avoided_grams: float
+    baseline_net_emissions_grams: float
+    candidate_net_emissions_grams: float
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SystemEmissionsBreakdown:
+    baseline_total_emissions_grams: float
+    candidate_total_emissions_grams: float
+    absolute_delta_emissions_grams: float
+    percent_delta_emissions: float
+    route_breakdowns: tuple[RouteEmissionsBreakdown, ...]
+    emissions_parameters: EmissionsParameters
+    ridership_assumptions: RidershipAssumptions
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ObjectivePillarBreakdown:
+    baseline_value: float
+    current_value: float
+    absolute_delta: float
+    percent_delta: float
+    coefficient: float
+    weighted_contribution: float
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ObjectiveBreakdown:
+    cost: ObjectivePillarBreakdown
+    emissions: ObjectivePillarBreakdown
+    total_combined_objective: float
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RouteCostDriverEstimate:
     route_id: str
     baseline_fleet: int
@@ -159,12 +237,24 @@ class RouteCostDriverEstimate:
     direction_count: int
     one_way_distance_miles: float
     round_trip_distance_miles: float
+    horizontal_one_way_distance_miles: float
+    horizontal_round_trip_distance_miles: float
+    three_d_one_way_distance_miles: float
+    three_d_round_trip_distance_miles: float
+    uphill_gain_one_way_miles: float
+    uphill_gain_round_trip_miles: float
+    uphill_gain_one_way_feet: float
+    uphill_gain_round_trip_feet: float
+    vehicle_type_category: str
+    vehicle_type_label: str
+    vehicle_type_source: str
     drivers_estimated: bool
     notes: tuple[str, ...]
 
 
 _DEFAULT_DOMAIN: RouteFleetDomain | None = None
-_DEFAULT_COST_PARAMETERS: CostParameters | None = None
+_DEFAULT_PARAMETERS: CostParameters | None = None
+_DEFAULT_WEEKDAY_RIDERSHIP: dict[str, float] | None = None
 
 
 def _load_parameter_value(block_name: str, field_name: str, raw: object) -> ParameterValue:
@@ -187,9 +277,9 @@ def _require_mapping(raw: object, block_name: str) -> dict:
     return raw
 
 
-def load_cost_parameters(data_path: str | pathlib.Path | None = None) -> CostParameters:
+def load_parameters(data_path: str | pathlib.Path | None = None) -> CostParameters:
     if data_path is None:
-        json_path = find_data_file("cost_parameters.json")
+        json_path = find_data_file("parameters.json")
     else:
         json_path = pathlib.Path(data_path)
 
@@ -197,7 +287,14 @@ def load_cost_parameters(data_path: str | pathlib.Path | None = None) -> CostPar
         raw = json.load(fh)
 
     root = _require_mapping(raw, "root")
-    expected_blocks = {"reporting_constants", "operating_cost_parameters", "estimation_assumptions"}
+    expected_blocks = {
+        "reporting_constants",
+        "operating_cost_parameters",
+        "estimation_assumptions",
+        "emissions_parameters",
+        "objective_weights",
+        "ridership_assumptions",
+    }
     missing_blocks = expected_blocks.difference(root)
     if missing_blocks:
         raise ValueError(f"Missing required blocks in {json_path}: {sorted(missing_blocks)}")
@@ -205,6 +302,9 @@ def load_cost_parameters(data_path: str | pathlib.Path | None = None) -> CostPar
     reporting_raw = _require_mapping(root["reporting_constants"], "reporting_constants")
     operating_raw = _require_mapping(root["operating_cost_parameters"], "operating_cost_parameters")
     estimation_raw = _require_mapping(root["estimation_assumptions"], "estimation_assumptions")
+    emissions_raw = _require_mapping(root["emissions_parameters"], "emissions_parameters")
+    objective_raw = _require_mapping(root["objective_weights"], "objective_weights")
+    ridership_raw = _require_mapping(root["ridership_assumptions"], "ridership_assumptions")
 
     reporting = ReportingConstants(
         annual_fare_revenue=_load_parameter_value(
@@ -269,11 +369,66 @@ def load_cost_parameters(data_path: str | pathlib.Path | None = None) -> CostPar
         ),
     )
 
+    emissions = EmissionsParameters(
+        car_emissions_grams_per_mile=_load_parameter_value(
+            "emissions_parameters",
+            "car_emissions_grams_per_mile",
+            emissions_raw.get("car_emissions_grams_per_mile"),
+        ),
+        car_ownership_probability=_load_parameter_value(
+            "emissions_parameters",
+            "car_ownership_probability",
+            emissions_raw.get("car_ownership_probability"),
+        ),
+        bus_base_emissions_grams_per_mile=_load_parameter_value(
+            "emissions_parameters",
+            "bus_base_emissions_grams_per_mile",
+            emissions_raw.get("bus_base_emissions_grams_per_mile"),
+        ),
+        bus_climb_penalty_grams_per_mile=_load_parameter_value(
+            "emissions_parameters",
+            "bus_climb_penalty_grams_per_mile",
+            emissions_raw.get("bus_climb_penalty_grams_per_mile"),
+        ),
+    )
+
+    objective_weights = ObjectiveWeights(
+        cost_percent_change_coefficient=_load_parameter_value(
+            "objective_weights",
+            "cost_percent_change_coefficient",
+            objective_raw.get("cost_percent_change_coefficient"),
+        ),
+        emissions_percent_change_coefficient=_load_parameter_value(
+            "objective_weights",
+            "emissions_percent_change_coefficient",
+            objective_raw.get("emissions_percent_change_coefficient"),
+        ),
+    )
+
+    ridership_assumptions = RidershipAssumptions(
+        route_average_trip_fraction=_load_parameter_value(
+            "ridership_assumptions",
+            "route_average_trip_fraction",
+            ridership_raw.get("route_average_trip_fraction"),
+        ),
+    )
+
     return CostParameters(
         reporting_constants=reporting,
         operating_cost_parameters=operating,
         estimation_assumptions=assumptions,
+        emissions_parameters=emissions,
+        objective_weights=objective_weights,
+        ridership_assumptions=ridership_assumptions,
     )
+
+
+def load_cost_parameters(data_path: str | pathlib.Path | None = None) -> CostParameters:
+    return load_parameters(data_path)
+
+
+def load_model_parameters(data_path: str | pathlib.Path | None = None) -> CostParameters:
+    return load_parameters(data_path)
 
 
 
@@ -346,52 +501,219 @@ def _load_route_stops_table(route_stops_path: str | pathlib.Path | None = None) 
     if missing:
         raise ValueError(f"Missing required columns in {csv_path}: {sorted(missing)}")
 
-    out = route_stops.loc[:, sorted(required)].copy()
+    selected_columns = sorted(required)
+    if "elevation_m" in route_stops.columns:
+        selected_columns.append("elevation_m")
+
+    out = route_stops.loc[:, selected_columns].copy()
     out["direction_id"] = out["direction_id"].fillna("0").astype(str)
     out["route_stop_order"] = pd.to_numeric(out["route_stop_order"], errors="coerce")
     out["stop_lat"] = pd.to_numeric(out["stop_lat"], errors="coerce")
     out["stop_lon"] = pd.to_numeric(out["stop_lon"], errors="coerce")
+    if "elevation_m" in out.columns:
+        out["elevation_m"] = pd.to_numeric(out["elevation_m"], errors="coerce")
+    else:
+        out["elevation_m"] = float("nan")
     out = out.dropna(subset=["route_id", "route_stop_order", "stop_lat", "stop_lon"])
     out["route_id"] = out["route_id"].astype(str)
     return out.sort_values(["route_id", "direction_id", "route_stop_order"]).reset_index(drop=True)
 
 
-def _compute_route_direction_lengths(route_stops: pd.DataFrame) -> dict[str, dict[str, float]]:
-    lengths_by_route: dict[str, dict[str, float]] = {}
-    for (route_id, direction_id), group in route_stops.groupby(["route_id", "direction_id"], sort=True):
-        ordered = group.sort_values(["route_stop_order"]).reset_index(drop=True)
-        coords = list(zip(ordered["stop_lat"], ordered["stop_lon"]))
-        if len(coords) < 2:
-            lengths_by_route.setdefault(route_id, {})[direction_id] = 0.0
+def _feet_from_miles(distance_miles: float) -> float:
+    return float(distance_miles * 5280.0)
+
+
+def _miles_from_feet(distance_feet: float) -> float:
+    return float(distance_feet / 5280.0)
+
+
+def _normalize_route_key(value: object) -> str:
+    text = str(value).strip().upper()
+    compact = "".join(ch for ch in text if ch.isalnum())
+    if compact.startswith("R") and len(compact) > 1 and compact[1:].isdigit():
+        return compact[1:]
+    return compact
+
+
+def _normalize_vehicle_type_label(raw: object) -> tuple[str, str]:
+    text = str(raw).strip()
+    normalized = text.upper().replace("-", " ")
+    normalized = " ".join(normalized.split())
+    label_map = {
+        "M STD": "motor_standard",
+        "M ARTIC": "motor_articulated",
+        "T STD": "trolley_standard",
+        "T ARTIC": "trolley_articulated",
+    }
+    category = label_map.get(normalized, "unknown")
+    return category, text
+
+
+def _select_vehicle_type_label(raw: object) -> tuple[str, str]:
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return "unknown", "Unknown"
+
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not parts:
+        return "unknown", "Unknown"
+
+    ranked_parts: list[tuple[int, str, str]] = []
+    rank_map = {
+        "motor_articulated": 4,
+        "motor_standard": 3,
+        "trolley_articulated": 2,
+        "trolley_standard": 1,
+        "unknown": 0,
+    }
+    for part in parts:
+        category, label = _normalize_vehicle_type_label(part)
+        ranked_parts.append((rank_map.get(category, 0), category, label))
+
+    ranked_parts.sort(key=lambda item: (-item[0], item[2]))
+    _, category, label = ranked_parts[0]
+    return category, label
+
+
+def _load_peak_vehicle_assignments(
+    data_path: str | pathlib.Path | None = None,
+) -> dict[str, tuple[str, str, str]]:
+    if data_path is None:
+        csv_path = find_data_file("peak_vehicles_by_route.csv")
+    else:
+        csv_path = pathlib.Path(data_path)
+
+    try:
+        peak = pd.read_csv(csv_path, dtype=str)
+    except FileNotFoundError:
+        return {}
+
+    required = {"Route"}
+    if not required.issubset(peak.columns):
+        return {}
+
+    vehicle_columns = [
+        "VehicleType_2025",
+        "VehicleType_2020",
+        "VehicleType_Existing_2017",
+        "VehicleType_2030",
+    ]
+
+    assignments: dict[str, tuple[str, str, str]] = {}
+    for row in peak.itertuples(index=False):
+        route_label = getattr(row, "Route", None)
+        if route_label is None:
             continue
 
-        length_miles = 0.0
-        for (lat1, lon1), (lat2, lon2) in zip(coords, coords[1:]):
-            length_miles += _haversine_miles(float(lat1), float(lon1), float(lat2), float(lon2))
-        lengths_by_route.setdefault(route_id, {})[direction_id] = float(length_miles)
-    return lengths_by_route
+        selected_value = None
+        selected_source = "peak_vehicles_by_route.csv"
+        for col in vehicle_columns:
+            if hasattr(row, col):
+                value = getattr(row, col)
+                if isinstance(value, str) and value.strip():
+                    selected_value = value.strip()
+                    selected_source = f"peak_vehicles_by_route.csv:{col}"
+                    break
+
+        category, label = _select_vehicle_type_label(selected_value)
+        assignments[_normalize_route_key(route_label)] = (category, label, selected_source)
+
+    return assignments
+
+
+def _resolve_route_vehicle_type(
+    route_id: str,
+    route_short_name: str,
+    peak_assignments: dict[str, tuple[str, str, str]],
+) -> tuple[str, str, str, tuple[str, ...]]:
+    keys_to_try = [_normalize_route_key(route_id), _normalize_route_key(route_short_name)]
+    for key in keys_to_try:
+        if key and key in peak_assignments:
+            category, label, source = peak_assignments[key]
+            return category, label, source, ()
+
+    fallback_notes = ("No peak-file vehicle match was found; using systemwide unknown-bus fallback metadata.",)
+    return "unknown", "Unknown bus", "system_fallback", fallback_notes
+
+
+def _compute_route_direction_metrics(route_stops: pd.DataFrame) -> dict[str, dict[str, dict[str, float | bool]]]:
+    metrics_by_route: dict[str, dict[str, dict[str, float | bool]]] = {}
+    for (route_id, direction_id), group in route_stops.groupby(["route_id", "direction_id"], sort=True):
+        ordered = group.sort_values(["route_stop_order"]).reset_index(drop=True)
+        if len(ordered) < 2:
+            metrics_by_route.setdefault(route_id, {})[direction_id] = {
+                "horizontal_distance_miles": 0.0,
+                "three_d_distance_miles": 0.0,
+                "uphill_gain_miles": 0.0,
+                "uphill_gain_feet": 0.0,
+                "missing_elevation_segments": 0.0,
+                "segments": 0.0,
+            }
+            continue
+
+        horizontal_distance_miles = 0.0
+        three_d_distance_miles = 0.0
+        uphill_gain_feet = 0.0
+        missing_elevation_segments = 0
+        for left, right in zip(ordered.itertuples(index=False), ordered.iloc[1:].itertuples(index=False)):
+            segment_horizontal_miles = _haversine_miles(
+                float(left.stop_lat),
+                float(left.stop_lon),
+                float(right.stop_lat),
+                float(right.stop_lon),
+            )
+            horizontal_distance_miles += segment_horizontal_miles
+
+            if pd.isna(left.elevation_m) or pd.isna(right.elevation_m):
+                vertical_miles = 0.0
+                segment_uphill_feet = 0.0
+                missing_elevation_segments += 1
+            else:
+                delta_meters = float(right.elevation_m) - float(left.elevation_m)
+                delta_feet = delta_meters * 3.280839895
+                vertical_miles = _miles_from_feet(abs(delta_feet))
+                segment_uphill_feet = max(delta_feet, 0.0)
+                uphill_gain_feet += segment_uphill_feet
+
+            three_d_distance_miles += math.sqrt(segment_horizontal_miles**2 + vertical_miles**2)
+
+        metrics_by_route.setdefault(route_id, {})[direction_id] = {
+            "horizontal_distance_miles": float(horizontal_distance_miles),
+            "three_d_distance_miles": float(three_d_distance_miles),
+            "uphill_gain_miles": _miles_from_feet(uphill_gain_feet),
+            "uphill_gain_feet": float(uphill_gain_feet),
+            "missing_elevation_segments": float(missing_elevation_segments),
+            "segments": float(max(len(ordered) - 1, 0)),
+        }
+    return metrics_by_route
 
 
 def _build_route_driver_estimates(
     table: pd.DataFrame,
     route_stops_path: str | pathlib.Path | None = None,
 ) -> tuple[RouteCostDriverEstimate, ...]:
-    direction_lengths: dict[str, dict[str, float]] = {}
+    direction_metrics: dict[str, dict[str, dict[str, float | bool]]] = {}
     try:
         if route_stops_path is not None:
             route_stops = _load_route_stops_table(route_stops_path)
-            direction_lengths = _compute_route_direction_lengths(route_stops)
+            direction_metrics = _compute_route_direction_metrics(route_stops)
         elif table.attrs.get("source_is_default", False):
             route_stops = _load_route_stops_table()
-            direction_lengths = _compute_route_direction_lengths(route_stops)
+            direction_metrics = _compute_route_direction_metrics(route_stops)
     except FileNotFoundError:
-        direction_lengths = {}
+        direction_metrics = {}
+
+    peak_assignments = _load_peak_vehicle_assignments()
 
     estimates: list[RouteCostDriverEstimate] = []
     for row in table.itertuples(index=False):
-        per_direction = direction_lengths.get(str(row.route_id), {})
-        directional_lengths = [float(per_direction[key]) for key in sorted(per_direction)]
-        direction_count = len(directional_lengths)
+        per_direction = direction_metrics.get(str(row.route_id), {})
+        directional_metrics = [per_direction[key] for key in sorted(per_direction)]
+        direction_count = len(directional_metrics)
+        vehicle_type_category, vehicle_type_label, vehicle_type_source, vehicle_notes = _resolve_route_vehicle_type(
+            route_id=str(row.route_id),
+            route_short_name=str(row.route_short_name),
+            peak_assignments=peak_assignments,
+        )
 
         notes: list[str] = [
             "Stop-to-stop haversine path length is an approximation, not GTFS shape ground truth.",
@@ -400,18 +722,69 @@ def _build_route_driver_estimates(
         if direction_count == 0:
             one_way_distance_miles = 0.0
             round_trip_distance_miles = 0.0
+            horizontal_one_way_distance_miles = 0.0
+            horizontal_round_trip_distance_miles = 0.0
+            three_d_one_way_distance_miles = 0.0
+            three_d_round_trip_distance_miles = 0.0
+            uphill_gain_one_way_miles = 0.0
+            uphill_gain_round_trip_miles = 0.0
+            uphill_gain_one_way_feet = 0.0
+            uphill_gain_round_trip_feet = 0.0
             drivers_estimated = False
             notes.append("No route-stop geometry was available for this route.")
         elif direction_count == 1:
-            one_way_distance_miles = directional_lengths[0]
-            round_trip_distance_miles = directional_lengths[0] * 2.0
+            horizontal_one_way_distance_miles = float(directional_metrics[0]["horizontal_distance_miles"])
+            horizontal_round_trip_distance_miles = horizontal_one_way_distance_miles * 2.0
+            three_d_one_way_distance_miles = float(directional_metrics[0]["three_d_distance_miles"])
+            three_d_round_trip_distance_miles = three_d_one_way_distance_miles * 2.0
+            uphill_gain_one_way_miles = float(directional_metrics[0]["uphill_gain_miles"])
+            uphill_gain_round_trip_miles = uphill_gain_one_way_miles * 2.0
+            uphill_gain_one_way_feet = float(directional_metrics[0]["uphill_gain_feet"])
+            uphill_gain_round_trip_feet = uphill_gain_one_way_feet * 2.0
+            one_way_distance_miles = horizontal_one_way_distance_miles
+            round_trip_distance_miles = horizontal_round_trip_distance_miles
             drivers_estimated = True
             notes.append("Only one direction was available; round-trip distance doubles the observed direction.")
         else:
-            one_way_distance_miles = sum(directional_lengths) / float(direction_count)
-            round_trip_distance_miles = sum(directional_lengths)
+            horizontal_one_way_distance_miles = sum(
+                float(metric["horizontal_distance_miles"]) for metric in directional_metrics
+            ) / float(direction_count)
+            horizontal_round_trip_distance_miles = sum(
+                float(metric["horizontal_distance_miles"]) for metric in directional_metrics
+            )
+            three_d_one_way_distance_miles = sum(
+                float(metric["three_d_distance_miles"]) for metric in directional_metrics
+            ) / float(direction_count)
+            three_d_round_trip_distance_miles = sum(
+                float(metric["three_d_distance_miles"]) for metric in directional_metrics
+            )
+            uphill_gain_one_way_miles = sum(
+                float(metric["uphill_gain_miles"]) for metric in directional_metrics
+            ) / float(direction_count)
+            uphill_gain_round_trip_miles = sum(float(metric["uphill_gain_miles"]) for metric in directional_metrics)
+            uphill_gain_one_way_feet = sum(
+                float(metric["uphill_gain_feet"]) for metric in directional_metrics
+            ) / float(direction_count)
+            uphill_gain_round_trip_feet = sum(float(metric["uphill_gain_feet"]) for metric in directional_metrics)
+            one_way_distance_miles = horizontal_one_way_distance_miles
+            round_trip_distance_miles = horizontal_round_trip_distance_miles
             drivers_estimated = True
             notes.append("Round-trip distance sums observed directional paths; one-way distance is their mean.")
+        notes.extend(vehicle_notes)
+
+        if direction_count > 0:
+            missing_elevation_segments = int(
+                sum(float(metric["missing_elevation_segments"]) for metric in directional_metrics)
+            )
+            total_segments = int(sum(float(metric["segments"]) for metric in directional_metrics))
+            if missing_elevation_segments > 0:
+                notes.append(
+                    "Missing stop elevations were treated as zero elevation change for "
+                    f"{missing_elevation_segments} of {total_segments} route segments."
+                )
+            notes.append(
+                "Terrain metrics preserve horizontal distance, 3D distance, and uphill-only gain per direction."
+            )
 
         estimates.append(
             RouteCostDriverEstimate(
@@ -421,6 +794,17 @@ def _build_route_driver_estimates(
                 direction_count=direction_count,
                 one_way_distance_miles=float(one_way_distance_miles),
                 round_trip_distance_miles=float(round_trip_distance_miles),
+                horizontal_one_way_distance_miles=float(horizontal_one_way_distance_miles),
+                horizontal_round_trip_distance_miles=float(horizontal_round_trip_distance_miles),
+                three_d_one_way_distance_miles=float(three_d_one_way_distance_miles),
+                three_d_round_trip_distance_miles=float(three_d_round_trip_distance_miles),
+                uphill_gain_one_way_miles=float(uphill_gain_one_way_miles),
+                uphill_gain_round_trip_miles=float(uphill_gain_round_trip_miles),
+                uphill_gain_one_way_feet=float(uphill_gain_one_way_feet),
+                uphill_gain_round_trip_feet=float(uphill_gain_round_trip_feet),
+                vehicle_type_category=vehicle_type_category,
+                vehicle_type_label=vehicle_type_label,
+                vehicle_type_source=vehicle_type_source,
                 drivers_estimated=drivers_estimated,
                 notes=tuple(notes),
             )
@@ -501,8 +885,41 @@ def load_route_fleet_domain(
     metadata["round_trip_distance_miles"] = metadata["route_id"].map(
         lambda route_id: driver_lookup[str(route_id)].round_trip_distance_miles
     )
+    metadata["horizontal_one_way_distance_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].horizontal_one_way_distance_miles
+    )
+    metadata["horizontal_round_trip_distance_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].horizontal_round_trip_distance_miles
+    )
+    metadata["three_d_one_way_distance_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].three_d_one_way_distance_miles
+    )
+    metadata["three_d_round_trip_distance_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].three_d_round_trip_distance_miles
+    )
+    metadata["uphill_gain_one_way_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].uphill_gain_one_way_miles
+    )
+    metadata["uphill_gain_round_trip_miles"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].uphill_gain_round_trip_miles
+    )
+    metadata["uphill_gain_one_way_feet"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].uphill_gain_one_way_feet
+    )
+    metadata["uphill_gain_round_trip_feet"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].uphill_gain_round_trip_feet
+    )
     metadata["direction_count"] = metadata["route_id"].map(
         lambda route_id: driver_lookup[str(route_id)].direction_count
+    )
+    metadata["vehicle_type_category"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].vehicle_type_category
+    )
+    metadata["vehicle_type_label"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].vehicle_type_label
+    )
+    metadata["vehicle_type_source"] = metadata["route_id"].map(
+        lambda route_id: driver_lookup[str(route_id)].vehicle_type_source
     )
 
     return RouteFleetDomain(
@@ -523,11 +940,73 @@ def get_default_domain() -> RouteFleetDomain:
     return _DEFAULT_DOMAIN
 
 
+def get_default_parameters() -> CostParameters:
+    global _DEFAULT_PARAMETERS
+    if _DEFAULT_PARAMETERS is None:
+        _DEFAULT_PARAMETERS = load_parameters()
+    return _DEFAULT_PARAMETERS
+
+
 def get_default_cost_parameters() -> CostParameters:
-    global _DEFAULT_COST_PARAMETERS
-    if _DEFAULT_COST_PARAMETERS is None:
-        _DEFAULT_COST_PARAMETERS = load_cost_parameters()
-    return _DEFAULT_COST_PARAMETERS
+    return get_default_parameters()
+
+
+def _parse_month_label_to_ordinal(value: object) -> int:
+    month_text = str(value).strip()
+    try:
+        ts = pd.to_datetime(month_text, format="%B %Y")
+    except (TypeError, ValueError):
+        return -1
+    return int(ts.year * 12 + ts.month)
+
+
+def _normalize_ridership_route_label(value: object) -> str:
+    text = str(value).strip().upper()
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return ""
+    first_token = text.split(" ", 1)[0]
+    return "".join(ch for ch in first_token if ch.isalnum())
+
+
+def _load_weekday_ridership(
+    ridership_path: str | pathlib.Path | None = None,
+) -> dict[str, float]:
+    if ridership_path is None:
+        csv_path = pathlib.Path("/Users/hq/Downloads/RidershipbyRouteTableDownload.csv")
+    else:
+        csv_path = pathlib.Path(ridership_path)
+
+    ridership = pd.read_csv(csv_path, dtype=str)
+    required = {"Month", "Route", "Service Day of the Week", "Average Daily Boardings"}
+    missing = required.difference(ridership.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in {csv_path}: {sorted(missing)}")
+
+    weekday = ridership.loc[ridership["Service Day of the Week"].astype(str).str.strip() == "Weekday"].copy()
+    weekday["route_key"] = weekday["Route"].map(_normalize_ridership_route_label)
+    weekday["month_ordinal"] = weekday["Month"].map(_parse_month_label_to_ordinal)
+    weekday["average_daily_boardings"] = (
+        weekday["Average Daily Boardings"].astype(str).str.replace(",", "", regex=False)
+    )
+    weekday["average_daily_boardings"] = pd.to_numeric(weekday["average_daily_boardings"], errors="coerce")
+    weekday = weekday.dropna(subset=["route_key", "month_ordinal", "average_daily_boardings"])
+    weekday = weekday.loc[weekday["route_key"] != ""].copy()
+    weekday = weekday.sort_values(["route_key", "month_ordinal"]).drop_duplicates(
+        subset=["route_key"],
+        keep="last",
+    )
+    return {
+        str(row.route_key): float(row.average_daily_boardings)
+        for row in weekday.itertuples(index=False)
+    }
+
+
+def get_default_weekday_ridership() -> dict[str, float]:
+    global _DEFAULT_WEEKDAY_RIDERSHIP
+    if _DEFAULT_WEEKDAY_RIDERSHIP is None:
+        _DEFAULT_WEEKDAY_RIDERSHIP = _load_weekday_ridership()
+    return _DEFAULT_WEEKDAY_RIDERSHIP
 
 
 def _service_scale(candidate_fleet: int, baseline_fleet: int) -> tuple[float, tuple[str, ...]]:
@@ -574,10 +1053,11 @@ def _annual_service_from_driver(
 def compute_cost_breakdown(
     y: Sequence[int],
     domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
     cost_parameters: CostParameters | None = None,
 ) -> SystemCostBreakdown:
     active_domain = domain or get_default_domain()
-    params = cost_parameters or get_default_cost_parameters()
+    params = parameters or cost_parameters or get_default_parameters()
     solution = _coerce_solution_vector(y, len(active_domain.route_ids))
 
     if not is_within_route_bounds(solution, active_domain):
@@ -679,17 +1159,222 @@ def compute_cost_breakdown(
 def cost_objective(
     y: Sequence[int],
     domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
     cost_parameters: CostParameters | None = None,
 ) -> float:
-    return float(compute_cost_breakdown(y, domain=domain, cost_parameters=cost_parameters).objective_cost)
+    return float(
+        compute_cost_breakdown(y, domain=domain, parameters=parameters, cost_parameters=cost_parameters).objective_cost
+    )
+
+
+def compute_emissions_breakdown(
+    y: Sequence[int],
+    domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
+    cost_parameters: CostParameters | None = None,
+    weekday_ridership: dict[str, float] | None = None,
+) -> SystemEmissionsBreakdown:
+    active_domain = domain or get_default_domain()
+    params = parameters or cost_parameters or get_default_parameters()
+    solution = _coerce_solution_vector(y, len(active_domain.route_ids))
+    ridership_lookup = weekday_ridership or get_default_weekday_ridership()
+
+    if not is_within_route_bounds(solution, active_domain):
+        raise ValueError("Solution violates per-route bounds")
+
+    route_breakdowns: list[RouteEmissionsBreakdown] = []
+    baseline_total = 0.0
+    candidate_total = 0.0
+    for driver, candidate_fleet in zip(active_domain.route_driver_estimates, solution):
+        service_scale, scale_notes = _service_scale(candidate_fleet, driver.baseline_fleet)
+        ridership_key = _normalize_route_key(driver.route_id)
+        baseline_riders = float(ridership_lookup.get(ridership_key, 0.0))
+        candidate_riders = baseline_riders * service_scale
+        average_rider_trip_distance_miles = (
+            driver.one_way_distance_miles * params.ridership_assumptions.route_average_trip_fraction.value
+        )
+        (
+            baseline_annual_vehicle_miles,
+            _baseline_annual_vehicle_hours,
+            candidate_annual_vehicle_miles,
+            _candidate_annual_vehicle_hours,
+        ) = _annual_service_from_driver(driver, params, service_scale)
+
+        uphill_ratio = (
+            driver.uphill_gain_round_trip_miles / driver.three_d_round_trip_distance_miles
+            if driver.three_d_round_trip_distance_miles > 0.0
+            else 0.0
+        )
+        bus_emissions_factor = (
+            params.emissions_parameters.bus_base_emissions_grams_per_mile.value
+            + params.emissions_parameters.bus_climb_penalty_grams_per_mile.value * uphill_ratio
+        )
+        baseline_bus_emissions_grams = baseline_annual_vehicle_miles * bus_emissions_factor
+        candidate_bus_emissions_grams = candidate_annual_vehicle_miles * bus_emissions_factor
+
+        annualization_factor = params.estimation_assumptions.weekday_service_days_per_year.value
+        rider_emissions_factor = (
+            average_rider_trip_distance_miles
+            * params.emissions_parameters.car_ownership_probability.value
+            * params.emissions_parameters.car_emissions_grams_per_mile.value
+            * annualization_factor
+        )
+        baseline_rider_emissions_avoided_grams = baseline_riders * rider_emissions_factor
+        candidate_rider_emissions_avoided_grams = candidate_riders * rider_emissions_factor
+        baseline_net_emissions_grams = baseline_bus_emissions_grams - baseline_rider_emissions_avoided_grams
+        candidate_net_emissions_grams = candidate_bus_emissions_grams - candidate_rider_emissions_avoided_grams
+
+        notes = driver.notes + scale_notes
+        if baseline_riders <= 0.0:
+            notes = notes + (
+                "No weekday ridership match was found for this route; baseline rider demand defaults to zero.",
+            )
+        notes = notes + (
+            "Ridership uses the latest available weekday average daily boardings from the local ridership file.",
+            "Average rider trip distance is proxied as one-way route distance multiplied by route_average_trip_fraction.",
+            "Bus emissions are annualized weekday service mileage times a base factor plus uphill-distance penalty.",
+            "Rider emissions avoided are annualized weekday riders times average trip distance and car-mode assumptions.",
+        )
+
+        baseline_total += baseline_net_emissions_grams
+        candidate_total += candidate_net_emissions_grams
+        route_breakdowns.append(
+            RouteEmissionsBreakdown(
+                route_id=driver.route_id,
+                baseline_fleet=int(driver.baseline_fleet),
+                candidate_fleet=int(candidate_fleet),
+                fleet_delta=int(candidate_fleet - driver.baseline_fleet),
+                service_scale=float(service_scale),
+                baseline_riders=float(baseline_riders),
+                candidate_riders=float(candidate_riders),
+                average_rider_trip_distance_miles=float(average_rider_trip_distance_miles),
+                baseline_bus_emissions_grams=float(baseline_bus_emissions_grams),
+                candidate_bus_emissions_grams=float(candidate_bus_emissions_grams),
+                baseline_rider_emissions_avoided_grams=float(baseline_rider_emissions_avoided_grams),
+                candidate_rider_emissions_avoided_grams=float(candidate_rider_emissions_avoided_grams),
+                baseline_net_emissions_grams=float(baseline_net_emissions_grams),
+                candidate_net_emissions_grams=float(candidate_net_emissions_grams),
+                notes=notes,
+            )
+        )
+
+    absolute_delta = candidate_total - baseline_total
+    percent_delta, percent_notes = _percent_change_vs_baseline(candidate_total, baseline_total)
+    notes = (
+        "Net emissions are defined as annual bus operating emissions minus annual rider car emissions avoided.",
+        "Weekday ridership is annualized with the same weekday service-day assumption used by the cost model.",
+    ) + percent_notes
+    return SystemEmissionsBreakdown(
+        baseline_total_emissions_grams=float(baseline_total),
+        candidate_total_emissions_grams=float(candidate_total),
+        absolute_delta_emissions_grams=float(absolute_delta),
+        percent_delta_emissions=float(percent_delta),
+        route_breakdowns=tuple(route_breakdowns),
+        emissions_parameters=params.emissions_parameters,
+        ridership_assumptions=params.ridership_assumptions,
+        notes=notes,
+    )
+
+
+def _percent_change_vs_baseline(current_value: float, baseline_value: float) -> tuple[float, tuple[str, ...]]:
+    if math.isclose(baseline_value, 0.0, abs_tol=1e-12):
+        if math.isclose(current_value, 0.0, abs_tol=1e-12):
+            return 0.0, ("Baseline value is zero; percent delta is pinned to zero because current is also zero.",)
+        return current_value - baseline_value, (
+            "Baseline value is zero; percent delta falls back to absolute delta to avoid division by zero.",
+        )
+    denominator = abs(baseline_value)
+    percent_delta = ((current_value - baseline_value) / denominator) * 100.0
+    notes: tuple[str, ...] = ()
+    if baseline_value < 0.0:
+        notes = (
+            "Percent delta uses the baseline magnitude so sign remains aligned with the lower-is-better objective when the baseline is negative.",
+        )
+    return float(percent_delta), notes
+
+
+def compute_objective_breakdown(
+    y: Sequence[int],
+    domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
+    cost_parameters: CostParameters | None = None,
+    weekday_ridership: dict[str, float] | None = None,
+) -> ObjectiveBreakdown:
+    active_domain = domain or get_default_domain()
+    params = parameters or cost_parameters or get_default_parameters()
+
+    baseline_cost = compute_cost_breakdown(active_domain.baseline, domain=active_domain, parameters=params)
+    candidate_cost = compute_cost_breakdown(y, domain=active_domain, parameters=params)
+    baseline_emissions = compute_emissions_breakdown(
+        active_domain.baseline,
+        domain=active_domain,
+        parameters=params,
+        weekday_ridership=weekday_ridership,
+    )
+    candidate_emissions = compute_emissions_breakdown(
+        y,
+        domain=active_domain,
+        parameters=params,
+        weekday_ridership=weekday_ridership,
+    )
+
+    cost_percent_delta, cost_notes = _percent_change_vs_baseline(
+        current_value=candidate_cost.annual_total_cost,
+        baseline_value=baseline_cost.annual_total_cost,
+    )
+    emissions_percent_delta, emissions_notes = _percent_change_vs_baseline(
+        current_value=candidate_emissions.candidate_total_emissions_grams,
+        baseline_value=baseline_emissions.candidate_total_emissions_grams,
+    )
+
+    cost_contribution = cost_percent_delta * params.objective_weights.cost_percent_change_coefficient.value
+    emissions_contribution = (
+        emissions_percent_delta * params.objective_weights.emissions_percent_change_coefficient.value
+    )
+
+    notes = (
+        "Combined objective is the sum of per-pillar percent deltas multiplied by explicit coefficients.",
+    )
+    return ObjectiveBreakdown(
+        cost=ObjectivePillarBreakdown(
+            baseline_value=float(baseline_cost.annual_total_cost),
+            current_value=float(candidate_cost.annual_total_cost),
+            absolute_delta=float(candidate_cost.annual_total_cost - baseline_cost.annual_total_cost),
+            percent_delta=float(cost_percent_delta),
+            coefficient=float(params.objective_weights.cost_percent_change_coefficient.value),
+            weighted_contribution=float(cost_contribution),
+            notes=cost_notes,
+        ),
+        emissions=ObjectivePillarBreakdown(
+            baseline_value=float(baseline_emissions.candidate_total_emissions_grams),
+            current_value=float(candidate_emissions.candidate_total_emissions_grams),
+            absolute_delta=float(
+                candidate_emissions.candidate_total_emissions_grams
+                - baseline_emissions.candidate_total_emissions_grams
+            ),
+            percent_delta=float(emissions_percent_delta),
+            coefficient=float(params.objective_weights.emissions_percent_change_coefficient.value),
+            weighted_contribution=float(emissions_contribution),
+            notes=emissions_notes,
+        ),
+        total_combined_objective=float(cost_contribution + emissions_contribution),
+        notes=notes,
+    )
 
 
 def objective_function(
     y: Sequence[int],
     domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
     cost_parameters: CostParameters | None = None,
 ) -> float:
-    return cost_objective(y, domain=domain, cost_parameters=cost_parameters)
+    breakdown = compute_objective_breakdown(
+        y,
+        domain=domain,
+        parameters=parameters,
+        cost_parameters=cost_parameters,
+    )
+    return float(breakdown.total_combined_objective)
 
 
 def is_within_route_bounds(y: Sequence[int], domain: RouteFleetDomain | None = None) -> bool:
@@ -796,9 +1481,15 @@ def _evaluate_candidate(
     vector: tuple[int, ...],
     domain: RouteFleetDomain,
     config: SearchConfig,
+    parameters: CostParameters | None = None,
     cost_parameters: CostParameters | None = None,
 ) -> float:
-    return objective_function(vector, domain=domain, cost_parameters=cost_parameters)
+    return objective_function(
+        vector,
+        domain=domain,
+        parameters=parameters,
+        cost_parameters=cost_parameters,
+    )
 
 
 def _is_move_tabu(move: Move, add_tenure: Sequence[float], drop_tenure: Sequence[float]) -> bool:
@@ -816,7 +1507,7 @@ def _first_pass_candidates(
     current: tuple[int, ...],
     domain: RouteFleetDomain,
     config: SearchConfig,
-    cost_parameters: CostParameters | None,
+    parameters: CostParameters | None,
     add_tenure: Sequence[float],
     drop_tenure: Sequence[float],
     obj_best: float,
@@ -836,7 +1527,7 @@ def _first_pass_candidates(
             continue
         move = make_add_move(idx)
         candidate = apply_move(current, move, step=config.step, domain=domain)
-        obj = _evaluate_candidate(candidate, domain, config, cost_parameters=cost_parameters)
+        obj = _evaluate_candidate(candidate, domain, config, parameters=parameters)
         if _is_move_tabu(move, add_tenure, drop_tenure) and not (obj < obj_best):
             continue
         add_candidates.append(CandidateNeighbor(move=move, vector=candidate, objective=obj))
@@ -849,7 +1540,7 @@ def _first_pass_candidates(
             continue
         move = make_drop_move(idx)
         candidate = apply_move(current, move, step=config.step, domain=domain)
-        obj = _evaluate_candidate(candidate, domain, config, cost_parameters=cost_parameters)
+        obj = _evaluate_candidate(candidate, domain, config, parameters=parameters)
         if _is_move_tabu(move, add_tenure, drop_tenure) and not (obj < obj_best):
             continue
         drop_candidates.append(CandidateNeighbor(move=move, vector=candidate, objective=obj))
@@ -861,7 +1552,7 @@ def select_neighborhood_candidates(
     current: tuple[int, ...],
     domain: RouteFleetDomain,
     config: SearchConfig,
-    cost_parameters: CostParameters | None,
+    parameters: CostParameters | None,
     add_tenure: Sequence[float],
     drop_tenure: Sequence[float],
     obj_best: float,
@@ -871,7 +1562,7 @@ def select_neighborhood_candidates(
         current=current,
         domain=domain,
         config=config,
-        cost_parameters=cost_parameters,
+        parameters=parameters,
         add_tenure=add_tenure,
         drop_tenure=drop_tenure,
         obj_best=obj_best,
@@ -920,7 +1611,7 @@ def select_neighborhood_candidates(
             ):
                 continue
 
-            obj = _evaluate_candidate(candidate, domain, config, cost_parameters=cost_parameters)
+            obj = _evaluate_candidate(candidate, domain, config, parameters=parameters)
             if _is_move_tabu(move, add_tenure, drop_tenure) and not (obj < obj_best):
                 continue
 
@@ -1006,16 +1697,61 @@ def _route_cost_delta_table(
     return out
 
 
+def _route_emissions_delta_table(
+    baseline: SystemEmissionsBreakdown,
+    candidate: SystemEmissionsBreakdown,
+) -> pd.DataFrame:
+    baseline_rows = {route.route_id: route for route in baseline.route_breakdowns}
+    candidate_rows = {route.route_id: route for route in candidate.route_breakdowns}
+
+    rows: list[dict[str, float | int | str]] = []
+    for route_id in sorted(candidate_rows):
+        base = baseline_rows[route_id]
+        cand = candidate_rows[route_id]
+        rows.append(
+            {
+                "route_id": route_id,
+                "baseline_fleet": base.baseline_fleet,
+                "optimized_fleet": cand.candidate_fleet,
+                "delta_fleet": cand.candidate_fleet - base.baseline_fleet,
+                "baseline_riders": base.candidate_riders,
+                "optimized_riders": cand.candidate_riders,
+                "delta_riders": cand.candidate_riders - base.candidate_riders,
+                "baseline_bus_emissions_grams": base.candidate_bus_emissions_grams,
+                "optimized_bus_emissions_grams": cand.candidate_bus_emissions_grams,
+                "delta_bus_emissions_grams": cand.candidate_bus_emissions_grams - base.candidate_bus_emissions_grams,
+                "baseline_rider_emissions_avoided_grams": base.candidate_rider_emissions_avoided_grams,
+                "optimized_rider_emissions_avoided_grams": cand.candidate_rider_emissions_avoided_grams,
+                "delta_rider_emissions_avoided_grams": (
+                    cand.candidate_rider_emissions_avoided_grams - base.candidate_rider_emissions_avoided_grams
+                ),
+                "baseline_net_emissions_grams": base.candidate_net_emissions_grams,
+                "optimized_net_emissions_grams": cand.candidate_net_emissions_grams,
+                "delta_net_emissions_grams": cand.candidate_net_emissions_grams - base.candidate_net_emissions_grams,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(
+            "delta_net_emissions_grams",
+            key=lambda s: s.abs(),
+            ascending=False,
+        ).reset_index(drop=True)
+    return out
+
+
 def run_route_fleet_search(
     domain: RouteFleetDomain | None = None,
     config: SearchConfig | None = None,
     seed: int = 0,
     initial_solution: Sequence[int] | None = None,
+    parameters: CostParameters | None = None,
     cost_parameters: CostParameters | None = None,
 ) -> SearchResult:
     active_domain = domain or get_default_domain()
     cfg = config or SearchConfig()
-    active_cost_parameters = cost_parameters or get_default_cost_parameters()
+    active_parameters = parameters or cost_parameters or get_default_parameters()
     rng = random.Random(seed)
 
     if cfg.max_iterations <= 0:
@@ -1041,7 +1777,7 @@ def run_route_fleet_search(
     tenure = float(cfg.tenure_init)
     temperature = float(cfg.temp_init)
 
-    obj_current = _evaluate_candidate(sol_current, active_domain, cfg, cost_parameters=active_cost_parameters)
+    obj_current = _evaluate_candidate(sol_current, active_domain, cfg, parameters=active_parameters)
     sol_best = sol_current
     obj_best = obj_current
 
@@ -1057,7 +1793,7 @@ def run_route_fleet_search(
             current=sol_current,
             domain=active_domain,
             config=cfg,
-            cost_parameters=active_cost_parameters,
+            parameters=active_parameters,
             add_tenure=add_tenure,
             drop_tenure=drop_tenure,
             obj_best=obj_best,
@@ -1157,20 +1893,44 @@ def run_route_fleet_search(
     initial_breakdown = compute_cost_breakdown(
         active_domain.baseline,
         domain=active_domain,
-        cost_parameters=active_cost_parameters,
+        parameters=active_parameters,
+    )
+    initial_emissions_breakdown = compute_emissions_breakdown(
+        active_domain.baseline,
+        domain=active_domain,
+        parameters=active_parameters,
+    )
+    initial_objective_breakdown = compute_objective_breakdown(
+        active_domain.baseline,
+        domain=active_domain,
+        parameters=active_parameters,
     )
     best_breakdown = compute_cost_breakdown(
         sol_best,
         domain=active_domain,
-        cost_parameters=active_cost_parameters,
+        parameters=active_parameters,
+    )
+    best_emissions_breakdown = compute_emissions_breakdown(
+        sol_best,
+        domain=active_domain,
+        parameters=active_parameters,
+    )
+    best_objective_breakdown = compute_objective_breakdown(
+        sol_best,
+        domain=active_domain,
+        parameters=active_parameters,
     )
     route_cost_delta_table = _route_cost_delta_table(initial_breakdown, best_breakdown)
+    route_emissions_delta_table = _route_emissions_delta_table(
+        initial_emissions_breakdown,
+        best_emissions_breakdown,
+    )
 
     return SearchResult(
         best_vector=sol_best,
-        best_objective=float(obj_best),
+        best_objective=float(best_objective_breakdown.total_combined_objective),
         initial_vector=tuple(active_domain.baseline),
-        initial_objective=float(initial_breakdown.objective_cost),
+        initial_objective=float(initial_objective_breakdown.total_combined_objective),
         iterations_completed=cfg.max_iterations,
         accepted_improving_moves=accepted_improving,
         accepted_nonimproving_moves=accepted_nonimproving,
@@ -1178,10 +1938,15 @@ def run_route_fleet_search(
         best_route_table=_route_comparison_table(active_domain, sol_best),
         initial_cost_breakdown=initial_breakdown,
         best_cost_breakdown=best_breakdown,
+        initial_emissions_breakdown=initial_emissions_breakdown,
+        best_emissions_breakdown=best_emissions_breakdown,
+        initial_objective_breakdown=initial_objective_breakdown,
+        best_objective_breakdown=best_objective_breakdown,
         annual_cost_delta_vs_baseline=float(best_breakdown.annual_total_cost - initial_breakdown.annual_total_cost),
         initial_budget_slack=float(initial_breakdown.annual_budget_slack),
         best_budget_slack=float(best_breakdown.annual_budget_slack),
         route_cost_delta_table=route_cost_delta_table,
+        route_emissions_delta_table=route_emissions_delta_table,
     )
 
 

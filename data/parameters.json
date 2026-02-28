@@ -52,5 +52,39 @@
       "value": 260.0,
       "label": "Weekday-only service assumption for later annualization"
     }
+  },
+  "emissions_parameters": {
+    "car_emissions_grams_per_mile": {
+      "value": 353.802111,
+      "label": "Passenger car emissions factor used for avoided rider driving"
+    },
+    "car_ownership_probability": {
+      "value": 0.7,
+      "label": "Share of riders assumed to substitute a car trip if transit service changes"
+    },
+    "bus_base_emissions_grams_per_mile": {
+      "value": 2830.0,
+      "label": "Systemwide base bus emissions factor for in-service mileage"
+    },
+    "bus_climb_penalty_grams_per_mile": {
+      "value": 5660.0,
+      "label": "Systemwide uphill penalty factor reserved for terrain-adjusted bus emissions"
+    }
+  },
+  "objective_weights": {
+    "cost_percent_change_coefficient": {
+      "value": 1.0,
+      "label": "Weight applied to annual cost percent change versus the current baseline"
+    },
+    "emissions_percent_change_coefficient": {
+      "value": 1.0,
+      "label": "Weight applied to net emissions percent change versus the current baseline"
+    }
+  },
+  "ridership_assumptions": {
+    "route_average_trip_fraction": {
+      "value": 0.5,
+      "label": "Placeholder share of one-way route length used as the average rider trip distance proxy"
+    }
   }
 }
