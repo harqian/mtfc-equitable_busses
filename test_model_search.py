@@ -3,14 +3,22 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
+
+import geopandas as gpd
+from shapely.geometry import Polygon
 
 from model import (
     SearchConfig,
     _load_weekday_ridership,
     apply_move,
+    assign_stops_to_sf_tracts,
+    build_sf_equity_data_bundle,
     canonical_move_key,
     compute_cost_breakdown,
+    compute_equity_breakdown,
     compute_emissions_breakdown,
+    compute_tract_service_access_summaries,
     compute_objective_breakdown,
     compute_sa_acceptance_probability,
     decay_tenures,
@@ -99,6 +107,11 @@ class TestRouteFleetPrimitives(unittest.TestCase):
                     "objective_weights": {
                         "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
                         "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                        "equity_percent_change_coefficient": {"value": 0.0, "label": "equity weight"},
+                    },
+                    "equity_parameters": {
+                        "service_intensity_coefficient": {"value": 1.0, "label": "service intensity"},
+                        "waiting_time_coefficient": {"value": 1.0, "label": "waiting time"},
                     },
                     "ridership_assumptions": {
                         "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
@@ -125,6 +138,8 @@ class TestRouteFleetPrimitives(unittest.TestCase):
         self.assertEqual(loaded.operating_cost_parameters.annualized_capital_cost_per_vehicle.label, "capital")
         self.assertEqual(loaded.emissions_parameters.car_emissions_grams_per_mile.value, 353.802111)
         self.assertEqual(loaded.objective_weights.cost_percent_change_coefficient.value, 1.0)
+        self.assertEqual(loaded.objective_weights.equity_percent_change_coefficient.value, 0.0)
+        self.assertEqual(loaded.equity_parameters.service_intensity_coefficient.value, 1.0)
 
         bad_path = Path(self.tempdir.name) / "bad_parameters.json"
         bad_path.write_text(
@@ -273,6 +288,7 @@ class TestSearchLoopBehavior(unittest.TestCase):
         self.assertEqual(result.best_objective_breakdown.total_combined_objective, result.best_objective)
         self.assertEqual(len(result.best_cost_breakdown.route_breakdowns), len(self.domain.route_ids))
         self.assertEqual(len(result.best_emissions_breakdown.route_breakdowns), len(self.domain.route_ids))
+        self.assertEqual(len(result.best_equity_breakdown.tract_breakdowns), len(self.domain.equity_tracts))
         self.assertEqual(result.best_budget_slack, result.best_cost_breakdown.annual_budget_slack)
         self.assertEqual(result.initial_budget_slack, result.initial_cost_breakdown.annual_budget_slack)
         self.assertAlmostEqual(
@@ -281,6 +297,7 @@ class TestSearchLoopBehavior(unittest.TestCase):
         )
         self.assertFalse(result.route_cost_delta_table.empty)
         self.assertFalse(result.route_emissions_delta_table.empty)
+        self.assertIn("delta_utility", result.tract_equity_delta_table.columns)
 
     def test_seeded_runs_are_deterministic(self) -> None:
         config = SearchConfig(max_iterations=25, nbhd_add_lim=6, nbhd_drop_lim=6, nbhd_swap_lim=12)
@@ -301,6 +318,47 @@ class TestSearchLoopBehavior(unittest.TestCase):
                 for event in result.events
             )
         )
+
+
+class TestPhaseOneEquityData(unittest.TestCase):
+    def _mock_epc_frame(self) -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(
+            {
+                "geoid": ["06075010100", "06075010200", "06001400100"],
+                "epc_2050": [1, 0, 1],
+                "epc_class": ["Tier 1", "Not EPC", "Tier 2"],
+                "tot_pop": [1200, 800, 500],
+            },
+            geometry=gpd.points_from_xy([-122.4, -122.5, -122.2], [37.7, 37.8, 37.9]),
+            crs="EPSG:4326",
+        )
+
+    def _mock_census_frame(self) -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(
+            {
+                "GEOID": ["06075010200", "06075010100", "06001400100"],
+                "COUNTYFP": ["075", "075", "001"],
+            },
+            geometry=gpd.points_from_xy([-122.5, -122.4, -122.2], [37.8, 37.7, 37.9]),
+            crs="EPSG:4326",
+        )
+
+    @mock.patch("model._download_to_path")
+    @mock.patch("model.gpd.read_file")
+    def test_equity_loader_returns_sf_rows_with_population_and_is_deterministic(self, read_file: mock.Mock, _download: mock.Mock) -> None:
+        read_file.side_effect = lambda path: (
+            self._mock_epc_frame() if str(path).endswith("mtc_epc.geojson") else self._mock_census_frame()
+        )
+
+        first = build_sf_equity_data_bundle()
+        second = build_sf_equity_data_bundle()
+
+        self.assertEqual(first.population_field, "tot_pop")
+        self.assertEqual(list(first.sf_epc_tracts["geoid"]), ["06075010100", "06075010200"])
+        self.assertEqual(list(first.sf_epc_tracts["epc_2050"]), [1, 0])
+        self.assertEqual(list(first.sf_epc_tracts["tract_population"]), [1200, 800])
+        self.assertEqual(first.sf_epc_tracts[["geoid", "epc_2050", "epc_class", "tract_population"]].to_dict("records"),
+                         second.sf_epc_tracts[["geoid", "epc_2050", "epc_class", "tract_population"]].to_dict("records"))
 
 
 class TestPhaseTwoRouteDrivers(unittest.TestCase):
@@ -341,6 +399,11 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
                     "objective_weights": {
                         "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
                         "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                        "equity_percent_change_coefficient": {"value": 0.0, "label": "equity weight"},
+                    },
+                    "equity_parameters": {
+                        "service_intensity_coefficient": {"value": 1.0, "label": "service intensity"},
+                        "waiting_time_coefficient": {"value": 1.0, "label": "waiting time"},
                     },
                     "ridership_assumptions": {
                         "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
@@ -349,14 +412,57 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.synthetic_sf_tracts = gpd.GeoDataFrame(
+            {
+                "geoid": ["06075000100", "06075000200"],
+                "epc_2050": [1, 0],
+                "epc_class": ["Tier 1", "Not EPC"],
+                "tract_population": [1000, 800],
+            },
+            geometry=[
+                Polygon([(-0.5, -0.5), (1.5, -0.5), (1.5, 0.5), (-0.5, 0.5)]),
+                Polygon([(-0.5, 0.5), (0.5, 0.5), (0.5, 1.5), (-0.5, 1.5)]),
+            ],
+            crs="EPSG:4326",
+        )
         self.parameters = load_parameters(self.parameters_path)
-        self.domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
+        self.domain = load_route_fleet_domain(
+            self.routes_path,
+            route_stops_path=self.route_stops_path,
+            equity_data=build_sf_equity_data_bundle(
+                epc_tracts=self.synthetic_sf_tracts.loc[:, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]]
+                .rename(columns={"tract_population": "tot_pop"}),
+                census_tracts=gpd.GeoDataFrame(
+                    {
+                        "GEOID": ["06075000100", "06075000200"],
+                        "COUNTYFP": ["075", "075"],
+                    },
+                    geometry=self.synthetic_sf_tracts.geometry,
+                    crs="EPSG:4326",
+                ),
+            ),
+        )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
     def test_distance_estimation_is_deterministic_for_fixed_stops(self) -> None:
-        domain2 = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
+        domain2 = load_route_fleet_domain(
+            self.routes_path,
+            route_stops_path=self.route_stops_path,
+            equity_data=build_sf_equity_data_bundle(
+                epc_tracts=self.synthetic_sf_tracts.loc[:, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]]
+                .rename(columns={"tract_population": "tot_pop"}),
+                census_tracts=gpd.GeoDataFrame(
+                    {
+                        "GEOID": ["06075000100", "06075000200"],
+                        "COUNTYFP": ["075", "075"],
+                    },
+                    geometry=self.synthetic_sf_tracts.geometry,
+                    crs="EPSG:4326",
+                ),
+            ),
+        )
 
         self.assertEqual(self.domain.route_driver_estimates, domain2.route_driver_estimates)
         r1 = self.domain.route_driver_estimates[0]
@@ -409,6 +515,55 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
         self.assertEqual(red_r1.candidate_annual_vehicle_hours, 0.0)
         self.assertLess(reduced.annual_total_cost, baseline.annual_total_cost)
 
+    def test_stop_assignments_map_most_points_to_sf_tracts(self) -> None:
+        route_stops = assign_stops_to_sf_tracts(
+            self.domain.stop_tract_assignments.drop(columns=["geoid"]),
+            self.synthetic_sf_tracts,
+        )
+
+        self.assertGreaterEqual(int(route_stops["geoid"].notna().sum()), 5)
+        self.assertIn("06075000100", set(route_stops["geoid"].dropna().astype(str)))
+        self.assertIn("06075000200", set(route_stops["geoid"].dropna().astype(str)))
+
+    def test_route_tract_summaries_are_deterministic_and_finite(self) -> None:
+        coverage1 = self.domain.route_tract_coverage
+        coverage2 = load_route_fleet_domain(
+            self.routes_path,
+            route_stops_path=self.route_stops_path,
+            equity_data=build_sf_equity_data_bundle(
+                epc_tracts=self.synthetic_sf_tracts.loc[:, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]]
+                .rename(columns={"tract_population": "tot_pop"}),
+                census_tracts=gpd.GeoDataFrame(
+                    {
+                        "GEOID": ["06075000100", "06075000200"],
+                        "COUNTYFP": ["075", "075"],
+                    },
+                    geometry=self.synthetic_sf_tracts.geometry,
+                    crs="EPSG:4326",
+                ),
+            ),
+        ).route_tract_coverage
+
+        self.assertEqual(coverage1, coverage2)
+        self.assertEqual(coverage1[0].route_id, "R1")
+        self.assertTrue(coverage1[0].touches_epc_tract)
+        self.assertEqual(dict(coverage1[0].stop_counts_by_tract)["06075000100"], 4)
+        self.assertTrue(all(len(summary.tract_geoids) >= 0 for summary in coverage1))
+
+    def test_candidate_tract_service_changes_monotonically_with_fleet(self) -> None:
+        baseline = {row.geoid: row for row in compute_tract_service_access_summaries((1, 2), domain=self.domain)}
+        expanded = {row.geoid: row for row in compute_tract_service_access_summaries((2, 2), domain=self.domain)}
+        reduced = {row.geoid: row for row in compute_tract_service_access_summaries((0, 2), domain=self.domain)}
+
+        self.assertGreater(
+            expanded["06075000100"].candidate_service_intensity,
+            baseline["06075000100"].candidate_service_intensity,
+        )
+        self.assertLess(
+            reduced["06075000100"].candidate_service_intensity,
+            baseline["06075000100"].candidate_service_intensity,
+        )
+
 
 class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
     def setUp(self) -> None:
@@ -448,6 +603,11 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             "objective_weights": {
                 "cost_percent_change_coefficient": {"value": 2.0, "label": "cost weight"},
                 "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                "equity_percent_change_coefficient": {"value": 0.0, "label": "equity weight"},
+            },
+            "equity_parameters": {
+                "service_intensity_coefficient": {"value": 1.0, "label": "service intensity"},
+                "waiting_time_coefficient": {"value": 1.0, "label": "waiting time"},
             },
             "ridership_assumptions": {
                 "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
@@ -460,9 +620,38 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
 
         self.parameters_path.write_text(json.dumps(base_payload), encoding="utf-8")
         self.alt_parameters_path.write_text(json.dumps(alt_payload), encoding="utf-8")
+        self.synthetic_sf_tracts = gpd.GeoDataFrame(
+            {
+                "geoid": ["06075000100", "06075000200"],
+                "epc_2050": [1, 0],
+                "epc_class": ["Tier 1", "Not EPC"],
+                "tract_population": [1000, 800],
+            },
+            geometry=[
+                Polygon([(-0.5, -0.5), (1.5, -0.5), (1.5, 0.5), (-0.5, 0.5)]),
+                Polygon([(-0.5, 0.5), (0.5, 0.5), (0.5, 1.5), (-0.5, 1.5)]),
+            ],
+            crs="EPSG:4326",
+        )
         self.parameters = load_parameters(self.parameters_path)
         self.alt_parameters = load_parameters(self.alt_parameters_path)
-        self.domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
+        self.domain = load_route_fleet_domain(
+            self.routes_path,
+            route_stops_path=self.route_stops_path,
+            equity_data=build_sf_equity_data_bundle(
+                epc_tracts=self.synthetic_sf_tracts.loc[
+                    :, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]
+                ].rename(columns={"tract_population": "tot_pop"}),
+                census_tracts=gpd.GeoDataFrame(
+                    {
+                        "GEOID": ["06075000100", "06075000200"],
+                        "COUNTYFP": ["075", "075"],
+                    },
+                    geometry=self.synthetic_sf_tracts.geometry,
+                    crs="EPSG:4326",
+                ),
+            ),
+        )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -504,6 +693,15 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             result.best_objective_breakdown.cost.weighted_contribution
             + result.best_objective_breakdown.emissions.weighted_contribution,
         )
+        self.assertAlmostEqual(
+            result.best_objective_breakdown.total_combined_objective,
+            result.best_objective_breakdown.cost.weighted_contribution
+            + result.best_objective_breakdown.emissions.weighted_contribution
+            + result.best_objective_breakdown.equity.weighted_contribution,
+        )
+        self.assertIsNotNone(result.initial_equity_breakdown)
+        self.assertIsNotNone(result.best_equity_breakdown)
+        self.assertIn("delta_utility", result.tract_equity_delta_table.columns)
 
     def test_negative_baseline_emissions_keep_percent_delta_sign_aligned_with_worse_outcomes(self) -> None:
         baseline = compute_objective_breakdown(
@@ -552,6 +750,11 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             "objective_weights": {
                 "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
                 "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                "equity_percent_change_coefficient": {"value": 0.0, "label": "equity weight"},
+            },
+            "equity_parameters": {
+                "service_intensity_coefficient": {"value": 1.0, "label": "service intensity"},
+                "waiting_time_coefficient": {"value": 1.0, "label": "waiting time"},
             },
             "ridership_assumptions": {
                 "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},
@@ -595,6 +798,73 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             fast_result.initial_objective_breakdown.total_combined_objective,
         )
 
+    def test_equity_tract_utilities_are_finite(self) -> None:
+        breakdown = compute_equity_breakdown((1, 2), domain=self.domain, parameters=self.parameters)
+
+        self.assertTrue(math.isfinite(breakdown.current_population_gap))
+        self.assertTrue(math.isfinite(breakdown.current_area_gap))
+        self.assertGreaterEqual(len(breakdown.tract_breakdowns), 2)
+        for tract in breakdown.tract_breakdowns:
+            self.assertTrue(math.isfinite(tract.baseline_utility))
+            self.assertTrue(math.isfinite(tract.candidate_utility))
+            self.assertTrue(math.isfinite(tract.baseline_waiting_time_proxy))
+            self.assertTrue(math.isfinite(tract.candidate_waiting_time_proxy))
+
+    def test_equity_gaps_aggregate_exactly_from_tract_rows(self) -> None:
+        breakdown = compute_equity_breakdown((1, 2), domain=self.domain, parameters=self.parameters)
+        epc = [tract for tract in breakdown.tract_breakdowns if tract.epc_2050 == 1]
+        non_epc = [tract for tract in breakdown.tract_breakdowns if tract.epc_2050 == 0]
+
+        baseline_epc_weighted = sum(tract.tract_population * tract.baseline_utility for tract in epc) / sum(
+            tract.tract_population for tract in epc
+        )
+        baseline_non_epc_weighted = sum(
+            tract.tract_population * tract.baseline_utility for tract in non_epc
+        ) / sum(tract.tract_population for tract in non_epc)
+        current_epc_weighted = sum(tract.tract_population * tract.candidate_utility for tract in epc) / sum(
+            tract.tract_population for tract in epc
+        )
+        current_non_epc_weighted = sum(
+            tract.tract_population * tract.candidate_utility for tract in non_epc
+        ) / sum(tract.tract_population for tract in non_epc)
+
+        self.assertAlmostEqual(
+            breakdown.baseline_population_gap,
+            abs(baseline_non_epc_weighted - baseline_epc_weighted),
+        )
+        self.assertAlmostEqual(
+            breakdown.current_population_gap,
+            abs(current_non_epc_weighted - current_epc_weighted),
+        )
+        self.assertAlmostEqual(
+            breakdown.baseline_area_gap,
+            abs(
+                sum(tract.baseline_utility for tract in non_epc) / len(non_epc)
+                - sum(tract.baseline_utility for tract in epc) / len(epc)
+            ),
+        )
+        self.assertAlmostEqual(
+            breakdown.current_area_gap,
+            abs(
+                sum(tract.candidate_utility for tract in non_epc) / len(non_epc)
+                - sum(tract.candidate_utility for tract in epc) / len(epc)
+            ),
+        )
+
+    def test_epc_heavy_route_changes_move_equity_gap_in_expected_direction(self) -> None:
+        baseline = compute_equity_breakdown((1, 2), domain=self.domain, parameters=self.parameters)
+        expanded_epc_route = compute_equity_breakdown((2, 2), domain=self.domain, parameters=self.parameters)
+        reduced_epc_route = compute_equity_breakdown((0, 2), domain=self.domain, parameters=self.parameters)
+
+        self.assertGreater(
+            expanded_epc_route.current_population_gap,
+            baseline.current_population_gap,
+        )
+        self.assertLess(
+            reduced_epc_route.current_population_gap,
+            baseline.current_population_gap,
+        )
+
 
 class TestPhaseThreeEmissionsCalculations(unittest.TestCase):
     def setUp(self) -> None:
@@ -636,6 +906,11 @@ class TestPhaseThreeEmissionsCalculations(unittest.TestCase):
                     "objective_weights": {
                         "cost_percent_change_coefficient": {"value": 1.0, "label": "cost weight"},
                         "emissions_percent_change_coefficient": {"value": 1.0, "label": "emissions weight"},
+                        "equity_percent_change_coefficient": {"value": 0.0, "label": "equity weight"},
+                    },
+                    "equity_parameters": {
+                        "service_intensity_coefficient": {"value": 1.0, "label": "service intensity"},
+                        "waiting_time_coefficient": {"value": 1.0, "label": "waiting time"},
                     },
                     "ridership_assumptions": {
                         "route_average_trip_fraction": {"value": 0.5, "label": "trip fraction"},

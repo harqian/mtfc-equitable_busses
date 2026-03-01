@@ -79,6 +79,20 @@
     "emissions_percent_change_coefficient": {
       "value": 1.0,
       "label": "Weight applied to net emissions percent change versus the current baseline"
+    },
+    "equity_percent_change_coefficient": {
+      "value": 1.0,
+      "label": "Weight applied to tract-level equity percent change versus the current baseline"
+    }
+  },
+  "equity_parameters": {
+    "service_intensity_coefficient": {
+      "value": 1.0,
+      "label": "Weight applied to tract service intensity in the equity utility proxy"
+    },
+    "waiting_time_coefficient": {
+      "value": 1.0,
+      "label": "Weight applied to tract waiting-time proxy in the equity utility proxy"
     }
   },
   "ridership_assumptions": {

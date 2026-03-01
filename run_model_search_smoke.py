@@ -79,6 +79,8 @@ def main() -> None:
     optimized = result.best_cost_breakdown
     baseline_emissions = result.initial_emissions_breakdown
     optimized_emissions = result.best_emissions_breakdown
+    baseline_equity = result.initial_equity_breakdown
+    optimized_equity = result.best_equity_breakdown
     baseline_objective = result.initial_objective_breakdown
     optimized_objective = result.best_objective_breakdown
 
@@ -122,6 +124,33 @@ def main() -> None:
         f"coefficient={optimized_objective.emissions.coefficient:,.4f}, "
         f"contribution={optimized_objective.emissions.weighted_contribution:,.4f}"
     )
+    print(
+        "  - equity: "
+        f"baseline_gap={baseline_objective.equity.baseline_value:,.4f}, "
+        f"optimized_gap={optimized_objective.equity.current_value:,.4f}, "
+        f"delta={optimized_objective.equity.absolute_delta:,.4f}, "
+        f"pct={optimized_objective.equity.percent_delta:,.2f}%, "
+        f"coefficient={optimized_objective.equity.coefficient:,.4f}, "
+        f"contribution={optimized_objective.equity.weighted_contribution:,.4f}"
+    )
+    print("- tract equity summary:")
+    print(
+        "  - baseline weighted utility: "
+        f"EPC={baseline_equity.baseline_epc_weighted_mean_utility:,.4f}, "
+        f"non-EPC={baseline_equity.baseline_non_epc_weighted_mean_utility:,.4f}, "
+        f"gap={baseline_equity.baseline_population_gap:,.4f}"
+    )
+    print(
+        "  - optimized weighted utility: "
+        f"EPC={optimized_equity.current_epc_weighted_mean_utility:,.4f}, "
+        f"non-EPC={optimized_equity.current_non_epc_weighted_mean_utility:,.4f}, "
+        f"gap={optimized_equity.current_population_gap:,.4f}"
+    )
+    print(
+        "  - gap delta: "
+        f"{optimized_equity.absolute_population_gap_delta:,.4f} "
+        f"({optimized_equity.percent_population_gap_delta:,.2f}%)"
+    )
     print("- event counts:")
     for key in sorted(event_counts):
         print(f"  - {key}: {event_counts[key]}")
@@ -130,6 +159,11 @@ def main() -> None:
         result.route_emissions_delta_table,
         on=["route_id", "baseline_fleet", "optimized_fleet", "delta_fleet"],
         how="outer",
+    )
+    changes = changes.merge(
+        domain.route_metadata.loc[:, ["route_id", "touches_epc_tract", "served_tract_count"]],
+        on="route_id",
+        how="left",
     )
     changes = changes.loc[changes["delta_fleet"] != 0].copy()
     changes = changes.sort_values(
@@ -151,9 +185,23 @@ def main() -> None:
             "delta_bus_emissions_grams",
             "delta_rider_emissions_avoided_grams",
             "delta_net_emissions_grams",
+            "touches_epc_tract",
+            "served_tract_count",
         ]
         print("\nTop route-level cost and emissions deltas:")
         print(show[cols].to_string(index=False))
+
+    if not result.tract_equity_delta_table.empty:
+        print("\nTop tract-level equity utility deltas:")
+        tract_cols = [
+            "geoid",
+            "epc_2050",
+            "tract_population",
+            "route_count_touching_tract",
+            "delta_service_intensity",
+            "delta_utility",
+        ]
+        print(result.tract_equity_delta_table.head(max(1, args.show_top))[tract_cols].to_string(index=False))
 
 
 if __name__ == "__main__":

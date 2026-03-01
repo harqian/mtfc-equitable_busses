@@ -4,13 +4,33 @@ import math
 import pathlib
 import random
 import re
+import tempfile
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
+from time import sleep
 from typing import Optional, Sequence
 
 import folium
+import geopandas as gpd
 import pandas as pd
 
 from data_utils import find_data_file
+
+
+MTC_EPC_GEOJSON_URL = (
+    "https://hub.arcgis.com/api/download/v1/items/"
+    "28a03a46fe9c4df0a29746d6f8c633c8/geojson?redirect=true&layers=0"
+)
+CENSUS_TRACTS_ZIP_URL = "https://www2.census.gov/geo/tiger/TIGER2024/TRACT/tl_2024_06_tract.zip"
+SF_COUNTY_FIPS = "075"
+SF_TRACT_GEOID_PREFIX = "06075"
+_EQUITY_POPULATION_FIELDS = (
+    "tot_pop",
+    "totpop",
+    "population",
+    "total_population",
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +70,7 @@ class CostParameters:
     estimation_assumptions: EstimationAssumptions
     emissions_parameters: "EmissionsParameters"
     objective_weights: "ObjectiveWeights"
+    equity_parameters: "EquityParameters"
     ridership_assumptions: "RidershipAssumptions"
 
 
@@ -65,11 +86,50 @@ class EmissionsParameters:
 class ObjectiveWeights:
     cost_percent_change_coefficient: ParameterValue
     emissions_percent_change_coefficient: ParameterValue
+    equity_percent_change_coefficient: ParameterValue
+
+
+@dataclass(frozen=True)
+class EquityParameters:
+    service_intensity_coefficient: ParameterValue
+    waiting_time_coefficient: ParameterValue
 
 
 @dataclass(frozen=True)
 class RidershipAssumptions:
     route_average_trip_fraction: ParameterValue
+
+
+@dataclass(frozen=True)
+class EquityTractMetadata:
+    geoid: str
+    epc_2050: int
+    epc_class: str
+    population: float
+
+
+@dataclass(frozen=True)
+class TractServiceAccessSummary:
+    geoid: str
+    route_count: int
+    stop_count: int
+    baseline_service_intensity: float
+    candidate_service_intensity: float
+
+
+@dataclass(frozen=True)
+class RouteTractCoverageSummary:
+    route_id: str
+    tract_geoids: tuple[str, ...]
+    stop_counts_by_tract: tuple[tuple[str, int], ...]
+    touches_epc_tract: bool
+
+
+@dataclass(frozen=True)
+class EquityDataBundle:
+    sf_epc_tracts: gpd.GeoDataFrame
+    population_field: str
+    notes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -81,6 +141,9 @@ class RouteFleetDomain:
     service_weights: tuple[float, ...]
     route_driver_estimates: tuple["RouteCostDriverEstimate", ...]
     route_metadata: pd.DataFrame
+    stop_tract_assignments: pd.DataFrame
+    route_tract_coverage: tuple["RouteTractCoverageSummary", ...]
+    equity_tracts: tuple[EquityTractMetadata, ...]
 
 
 @dataclass(frozen=True)
@@ -122,6 +185,8 @@ class SearchResult:
     best_cost_breakdown: "SystemCostBreakdown"
     initial_emissions_breakdown: "SystemEmissionsBreakdown"
     best_emissions_breakdown: "SystemEmissionsBreakdown"
+    initial_equity_breakdown: "SystemEquityBreakdown"
+    best_equity_breakdown: "SystemEquityBreakdown"
     initial_objective_breakdown: "ObjectiveBreakdown"
     best_objective_breakdown: "ObjectiveBreakdown"
     annual_cost_delta_vs_baseline: float
@@ -129,6 +194,7 @@ class SearchResult:
     best_budget_slack: float
     route_cost_delta_table: pd.DataFrame
     route_emissions_delta_table: pd.DataFrame
+    tract_equity_delta_table: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -211,6 +277,45 @@ class SystemEmissionsBreakdown:
 
 
 @dataclass(frozen=True)
+class EquityTractBreakdown:
+    geoid: str
+    epc_2050: int
+    epc_class: str
+    tract_population: float
+    route_count_touching_tract: int
+    baseline_service_intensity: float
+    candidate_service_intensity: float
+    baseline_waiting_time_proxy: float
+    candidate_waiting_time_proxy: float
+    baseline_utility: float
+    candidate_utility: float
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SystemEquityBreakdown:
+    baseline_population_gap: float
+    current_population_gap: float
+    absolute_population_gap_delta: float
+    percent_population_gap_delta: float
+    baseline_area_gap: float
+    current_area_gap: float
+    absolute_area_gap_delta: float
+    percent_area_gap_delta: float
+    baseline_epc_weighted_mean_utility: float
+    current_epc_weighted_mean_utility: float
+    baseline_non_epc_weighted_mean_utility: float
+    current_non_epc_weighted_mean_utility: float
+    baseline_epc_mean_utility: float
+    current_epc_mean_utility: float
+    baseline_non_epc_mean_utility: float
+    current_non_epc_mean_utility: float
+    tract_breakdowns: tuple[EquityTractBreakdown, ...]
+    equity_parameters: EquityParameters
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ObjectivePillarBreakdown:
     baseline_value: float
     current_value: float
@@ -225,6 +330,7 @@ class ObjectivePillarBreakdown:
 class ObjectiveBreakdown:
     cost: ObjectivePillarBreakdown
     emissions: ObjectivePillarBreakdown
+    equity: ObjectivePillarBreakdown
     total_combined_objective: float
     notes: tuple[str, ...]
 
@@ -255,6 +361,125 @@ class RouteCostDriverEstimate:
 _DEFAULT_DOMAIN: RouteFleetDomain | None = None
 _DEFAULT_PARAMETERS: CostParameters | None = None
 _DEFAULT_WEEKDAY_RIDERSHIP: dict[str, float] | None = None
+_DEFAULT_EQUITY_DATA: EquityDataBundle | None = None
+
+
+def _require_columns(frame: pd.DataFrame, required: set[str], label: str) -> None:
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {missing}")
+
+
+def _download_to_path(url: str, out_path: Path, attempts: int = 3) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "mtfc-equity-loader/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as response:
+                payload = response.read()
+            out_path.write_bytes(payload)
+            if out_path.stat().st_size == 0:
+                raise ValueError(f"Downloaded zero bytes from {url}")
+            return
+        except Exception as exc:  # pragma: no cover - network retry path
+            last_error = exc
+            if attempt < attempts:
+                sleep(float(attempt))
+    assert last_error is not None
+    raise last_error
+
+
+def _resolve_equity_population_field(columns: Sequence[object]) -> str:
+    normalized = {str(column).strip().lower(): str(column) for column in columns}
+    for candidate in _EQUITY_POPULATION_FIELDS:
+        if candidate in normalized:
+            return normalized[candidate]
+    raise ValueError(
+        "MTC EPC GeoJSON is missing a supported tract population field; "
+        f"tried {_EQUITY_POPULATION_FIELDS}"
+    )
+
+
+def load_epc_tracts_geojson() -> gpd.GeoDataFrame:
+    with tempfile.TemporaryDirectory(prefix="equity-data-") as tempdir:
+        geojson_path = Path(tempdir) / "mtc_epc.geojson"
+        _download_to_path(MTC_EPC_GEOJSON_URL, geojson_path)
+        try:
+            gdf = gpd.read_file(geojson_path)
+        except Exception:
+            payload = json.loads(geojson_path.read_text(encoding="utf-8"))
+            gdf = gpd.GeoDataFrame.from_features(payload["features"], crs="EPSG:4326")
+    _require_columns(gdf, {"geoid", "epc_2050", "epc_class", "geometry"}, "MTC EPC GeoJSON")
+    population_field = _resolve_equity_population_field(gdf.columns)
+    gdf["geoid"] = gdf["geoid"].astype(str)
+    gdf["epc_2050"] = pd.to_numeric(gdf["epc_2050"], errors="coerce").fillna(0).astype(int)
+    gdf["epc_class"] = gdf["epc_class"].fillna("").astype(str)
+    gdf[population_field] = pd.to_numeric(gdf[population_field], errors="coerce")
+    return gdf
+
+
+def load_census_tract_geometries() -> gpd.GeoDataFrame:
+    with tempfile.TemporaryDirectory(prefix="equity-data-") as tempdir:
+        zip_path = Path(tempdir) / "tl_2024_06_tract.zip"
+        _download_to_path(CENSUS_TRACTS_ZIP_URL, zip_path)
+        gdf = gpd.read_file(f"zip://{zip_path}")
+    _require_columns(gdf, {"GEOID", "COUNTYFP", "geometry"}, "Census tract TIGER shapefile")
+    gdf["GEOID"] = gdf["GEOID"].astype(str)
+    gdf["COUNTYFP"] = gdf["COUNTYFP"].astype(str)
+    return gdf
+
+
+def build_sf_equity_data_bundle(
+    epc_tracts: gpd.GeoDataFrame | None = None,
+    census_tracts: gpd.GeoDataFrame | None = None,
+) -> EquityDataBundle:
+    epc = load_epc_tracts_geojson() if epc_tracts is None else epc_tracts.copy()
+    tracts = load_census_tract_geometries() if census_tracts is None else census_tracts.copy()
+
+    population_field = _resolve_equity_population_field(epc.columns)
+    sf_epc = epc.loc[epc["geoid"].astype(str).str.startswith(SF_TRACT_GEOID_PREFIX)].copy()
+    if sf_epc.empty:
+        raise ValueError("MTC EPC feed returned no San Francisco census tracts")
+
+    sf_tracts = tracts.loc[tracts["COUNTYFP"].astype(str) == SF_COUNTY_FIPS, ["GEOID", "geometry"]].copy()
+    if sf_tracts.empty:
+        raise ValueError("Census TIGER feed returned no San Francisco tract geometries")
+    if sf_tracts.crs != "EPSG:4326":
+        sf_tracts = sf_tracts.to_crs("EPSG:4326")
+
+    merged = sf_epc.merge(
+        sf_tracts.rename(columns={"GEOID": "geoid"}),
+        on="geoid",
+        how="inner",
+        suffixes=("_epc", ""),
+    )
+    if merged.empty:
+        raise ValueError("No San Francisco EPC rows matched San Francisco tract geometries by GEOID")
+
+    merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=sf_tracts.crs)
+    merged = merged.loc[:, ["geoid", "epc_2050", "epc_class", population_field, "geometry"]].copy()
+    merged = merged.rename(columns={population_field: "tract_population"})
+    merged["tract_population"] = pd.to_numeric(merged["tract_population"], errors="coerce")
+    merged = merged.dropna(subset=["tract_population"]).sort_values(["geoid"]).reset_index(drop=True)
+    if merged.empty:
+        raise ValueError("No San Francisco EPC tracts retained a usable tract population field")
+
+    notes = (
+        f"Population weighting uses the live MTC EPC field '{population_field}'.",
+        "San Francisco tract geometry comes from the California TIGER tract feed filtered to county FIPS 075.",
+    )
+    return EquityDataBundle(
+        sf_epc_tracts=merged,
+        population_field=population_field,
+        notes=notes,
+    )
+
+
+def get_default_equity_data() -> EquityDataBundle:
+    global _DEFAULT_EQUITY_DATA
+    if _DEFAULT_EQUITY_DATA is None:
+        _DEFAULT_EQUITY_DATA = build_sf_equity_data_bundle()
+    return _DEFAULT_EQUITY_DATA
 
 
 def _load_parameter_value(block_name: str, field_name: str, raw: object) -> ParameterValue:
@@ -293,6 +518,7 @@ def load_parameters(data_path: str | pathlib.Path | None = None) -> CostParamete
         "estimation_assumptions",
         "emissions_parameters",
         "objective_weights",
+        "equity_parameters",
         "ridership_assumptions",
     }
     missing_blocks = expected_blocks.difference(root)
@@ -304,6 +530,7 @@ def load_parameters(data_path: str | pathlib.Path | None = None) -> CostParamete
     estimation_raw = _require_mapping(root["estimation_assumptions"], "estimation_assumptions")
     emissions_raw = _require_mapping(root["emissions_parameters"], "emissions_parameters")
     objective_raw = _require_mapping(root["objective_weights"], "objective_weights")
+    equity_raw = _require_mapping(root["equity_parameters"], "equity_parameters")
     ridership_raw = _require_mapping(root["ridership_assumptions"], "ridership_assumptions")
 
     reporting = ReportingConstants(
@@ -403,6 +630,24 @@ def load_parameters(data_path: str | pathlib.Path | None = None) -> CostParamete
             "emissions_percent_change_coefficient",
             objective_raw.get("emissions_percent_change_coefficient"),
         ),
+        equity_percent_change_coefficient=_load_parameter_value(
+            "objective_weights",
+            "equity_percent_change_coefficient",
+            objective_raw.get("equity_percent_change_coefficient"),
+        ),
+    )
+
+    equity_parameters = EquityParameters(
+        service_intensity_coefficient=_load_parameter_value(
+            "equity_parameters",
+            "service_intensity_coefficient",
+            equity_raw.get("service_intensity_coefficient"),
+        ),
+        waiting_time_coefficient=_load_parameter_value(
+            "equity_parameters",
+            "waiting_time_coefficient",
+            equity_raw.get("waiting_time_coefficient"),
+        ),
     )
 
     ridership_assumptions = RidershipAssumptions(
@@ -419,6 +664,7 @@ def load_parameters(data_path: str | pathlib.Path | None = None) -> CostParamete
         estimation_assumptions=assumptions,
         emissions_parameters=emissions,
         objective_weights=objective_weights,
+        equity_parameters=equity_parameters,
         ridership_assumptions=ridership_assumptions,
     )
 
@@ -502,6 +748,8 @@ def _load_route_stops_table(route_stops_path: str | pathlib.Path | None = None) 
         raise ValueError(f"Missing required columns in {csv_path}: {sorted(missing)}")
 
     selected_columns = sorted(required)
+    if "stop_id" in route_stops.columns:
+        selected_columns.append("stop_id")
     if "elevation_m" in route_stops.columns:
         selected_columns.append("elevation_m")
 
@@ -516,7 +764,160 @@ def _load_route_stops_table(route_stops_path: str | pathlib.Path | None = None) 
         out["elevation_m"] = float("nan")
     out = out.dropna(subset=["route_id", "route_stop_order", "stop_lat", "stop_lon"])
     out["route_id"] = out["route_id"].astype(str)
+    if "stop_id" in out.columns:
+        out["stop_id"] = out["stop_id"].astype(str)
+    else:
+        out["stop_id"] = out.index.astype(str)
     return out.sort_values(["route_id", "direction_id", "route_stop_order"]).reset_index(drop=True)
+
+
+def assign_stops_to_sf_tracts(
+    route_stops: pd.DataFrame,
+    sf_tracts: gpd.GeoDataFrame,
+) -> pd.DataFrame:
+    _require_columns(route_stops, {"route_id", "stop_id", "stop_lat", "stop_lon"}, "route stops table")
+    _require_columns(sf_tracts, {"geoid", "geometry"}, "San Francisco tract geometry")
+
+    unique_stops = (
+        route_stops.loc[:, ["stop_id", "stop_lat", "stop_lon"]]
+        .drop_duplicates(subset=["stop_id"])
+        .reset_index(drop=True)
+    )
+    stop_points = gpd.GeoDataFrame(
+        unique_stops,
+        geometry=gpd.points_from_xy(unique_stops["stop_lon"], unique_stops["stop_lat"]),
+        crs="EPSG:4326",
+    )
+    working_tracts = sf_tracts.loc[:, ["geoid", "geometry"]].copy()
+    if working_tracts.crs != "EPSG:4326":
+        working_tracts = working_tracts.to_crs("EPSG:4326")
+
+    stop_tract_join = gpd.sjoin(stop_points, working_tracts, how="left", predicate="within")
+    assignments = route_stops.copy()
+    assignments = assignments.merge(
+        stop_tract_join.loc[:, ["stop_id", "geoid"]],
+        on="stop_id",
+        how="left",
+    )
+    return assignments
+
+
+def _build_route_tract_coverage(
+    route_stops_with_tracts: pd.DataFrame,
+    route_ids: Sequence[str],
+    sf_epc_tracts: gpd.GeoDataFrame,
+) -> tuple[RouteTractCoverageSummary, ...]:
+    epc_lookup = {
+        str(row.geoid): int(row.epc_2050)
+        for row in sf_epc_tracts.loc[:, ["geoid", "epc_2050"]].itertuples(index=False)
+    }
+    summaries: list[RouteTractCoverageSummary] = []
+    for route_id in route_ids:
+        route_rows = route_stops_with_tracts.loc[
+            (route_stops_with_tracts["route_id"].astype(str) == str(route_id))
+            & route_stops_with_tracts["geoid"].notna()
+        ].copy()
+        tract_counts = route_rows["geoid"].astype(str).value_counts().sort_index()
+        tract_geoids = tuple(tract_counts.index.tolist())
+        stop_counts_by_tract = tuple((str(geoid), int(count)) for geoid, count in tract_counts.items())
+        summaries.append(
+            RouteTractCoverageSummary(
+                route_id=str(route_id),
+                tract_geoids=tract_geoids,
+                stop_counts_by_tract=stop_counts_by_tract,
+                touches_epc_tract=any(epc_lookup.get(str(geoid), 0) == 1 for geoid in tract_geoids),
+            )
+        )
+    return tuple(summaries)
+
+
+def compute_tract_service_access_summaries(
+    y: Sequence[int],
+    domain: RouteFleetDomain | None = None,
+) -> tuple[TractServiceAccessSummary, ...]:
+    active_domain = domain or get_default_domain()
+    solution = _coerce_solution_vector(y, len(active_domain.route_ids))
+    route_coverage_lookup = {summary.route_id: summary for summary in active_domain.route_tract_coverage}
+    route_driver_lookup = {driver.route_id: driver for driver in active_domain.route_driver_estimates}
+
+    tract_service: dict[str, dict[str, object]] = {}
+    for route_id, candidate_fleet in zip(active_domain.route_ids, solution):
+        coverage = route_coverage_lookup.get(route_id)
+        if coverage is None or not coverage.stop_counts_by_tract:
+            continue
+        driver = route_driver_lookup[route_id]
+        total_stops = sum(count for _, count in coverage.stop_counts_by_tract)
+        if total_stops <= 0:
+            continue
+        service_scale, _scale_notes = _service_scale(candidate_fleet, driver.baseline_fleet)
+        baseline_route_service = max(float(driver.weekday_planned_trips), 0.0)
+        candidate_route_service = baseline_route_service * float(service_scale)
+
+        for geoid, stop_count in coverage.stop_counts_by_tract:
+            tract_stats = tract_service.setdefault(
+                str(geoid),
+                {
+                    "routes": set(),
+                    "stop_count": 0,
+                    "baseline_service_intensity": 0.0,
+                    "candidate_service_intensity": 0.0,
+                },
+            )
+            share = float(stop_count) / float(total_stops)
+            routes = tract_stats["routes"]
+            assert isinstance(routes, set)
+            routes.add(route_id)
+            tract_stats["stop_count"] = int(tract_stats["stop_count"]) + int(stop_count)
+            tract_stats["baseline_service_intensity"] = (
+                float(tract_stats["baseline_service_intensity"]) + baseline_route_service * share
+            )
+            tract_stats["candidate_service_intensity"] = (
+                float(tract_stats["candidate_service_intensity"]) + candidate_route_service * share
+            )
+
+    summaries: list[TractServiceAccessSummary] = []
+    for geoid in sorted(tract_service):
+        tract_stats = tract_service[geoid]
+        routes = tract_stats["routes"]
+        assert isinstance(routes, set)
+        summaries.append(
+            TractServiceAccessSummary(
+                geoid=str(geoid),
+                route_count=len(routes),
+                stop_count=int(tract_stats["stop_count"]),
+                baseline_service_intensity=float(tract_stats["baseline_service_intensity"]),
+                candidate_service_intensity=float(tract_stats["candidate_service_intensity"]),
+            )
+        )
+    return tuple(summaries)
+
+
+def _waiting_time_proxy(service_intensity: float) -> float:
+    return float(1.0 / (1.0 + max(service_intensity, 0.0)))
+
+
+def _tract_utility(
+    service_intensity: float,
+    waiting_time_proxy: float,
+    equity_parameters: EquityParameters,
+) -> float:
+    return float(
+        equity_parameters.service_intensity_coefficient.value * service_intensity
+        - equity_parameters.waiting_time_coefficient.value * waiting_time_proxy
+    )
+
+
+def _weighted_mean(pairs: Sequence[tuple[float, float]]) -> float:
+    total_weight = sum(max(weight, 0.0) for weight, _value in pairs)
+    if total_weight <= 0.0:
+        return 0.0
+    return float(sum(max(weight, 0.0) * value for weight, value in pairs) / total_weight)
+
+
+def _mean(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / float(len(values)))
 
 
 def _feet_from_miles(distance_miles: float) -> float:
@@ -816,6 +1217,7 @@ def _build_route_driver_estimates(
 def load_route_fleet_domain(
     data_path: str | pathlib.Path | None = None,
     route_stops_path: str | pathlib.Path | None = None,
+    equity_data: EquityDataBundle | None = None,
 ) -> RouteFleetDomain:
     use_default_route_stops = data_path is None and route_stops_path is None
     if data_path is None:
@@ -861,6 +1263,20 @@ def load_route_fleet_domain(
         service = pd.Series([1.0] * len(table), index=table.index, dtype=float)
     else:
         service = 1.0 + (service_raw / denom)
+
+    stop_tract_assignments = pd.DataFrame(
+        columns=["route_id", "direction_id", "route_stop_order", "stop_lat", "stop_lon", "stop_id", "geoid"]
+    )
+    route_tract_coverage: tuple[RouteTractCoverageSummary, ...] = tuple(
+        RouteTractCoverageSummary(
+            route_id=str(route_id),
+            tract_geoids=(),
+            stop_counts_by_tract=(),
+            touches_epc_tract=False,
+        )
+        for route_id in table["route_id"].tolist()
+    )
+    equity_tracts: tuple[EquityTractMetadata, ...] = ()
 
     metadata = table.loc[
         :,
@@ -922,6 +1338,40 @@ def load_route_fleet_domain(
         lambda route_id: driver_lookup[str(route_id)].vehicle_type_source
     )
 
+    should_build_equity_cache = route_stops_path is not None or use_default_route_stops
+    active_equity_data: EquityDataBundle | None = equity_data
+    if active_equity_data is None and use_default_route_stops:
+        active_equity_data = get_default_equity_data()
+    if should_build_equity_cache and active_equity_data is not None:
+        route_stops = _load_route_stops_table(route_stops_path)
+        stop_tract_assignments = assign_stops_to_sf_tracts(route_stops, active_equity_data.sf_epc_tracts)
+        route_tract_coverage = _build_route_tract_coverage(
+            stop_tract_assignments,
+            route_ids=table["route_id"].tolist(),
+            sf_epc_tracts=active_equity_data.sf_epc_tracts,
+        )
+        coverage_lookup = {summary.route_id: summary for summary in route_tract_coverage}
+        metadata["touches_epc_tract"] = metadata["route_id"].map(
+            lambda route_id: coverage_lookup[str(route_id)].touches_epc_tract
+        )
+        metadata["served_tract_count"] = metadata["route_id"].map(
+            lambda route_id: len(coverage_lookup[str(route_id)].tract_geoids)
+        )
+        equity_tracts = tuple(
+            EquityTractMetadata(
+                geoid=str(row.geoid),
+                epc_2050=int(row.epc_2050),
+                epc_class=str(row.epc_class),
+                population=float(row.tract_population),
+            )
+            for row in active_equity_data.sf_epc_tracts.loc[
+                :, ["geoid", "epc_2050", "epc_class", "tract_population"]
+            ].sort_values(["geoid"]).itertuples(index=False)
+        )
+    else:
+        metadata["touches_epc_tract"] = False
+        metadata["served_tract_count"] = 0
+
     return RouteFleetDomain(
         route_ids=tuple(table["route_id"].tolist()),
         baseline=tuple(int(v) for v in baseline.tolist()),
@@ -930,6 +1380,9 @@ def load_route_fleet_domain(
         service_weights=tuple(float(v) for v in service.tolist()),
         route_driver_estimates=route_driver_estimates,
         route_metadata=metadata,
+        stop_tract_assignments=stop_tract_assignments,
+        route_tract_coverage=route_tract_coverage,
+        equity_tracts=equity_tracts,
     )
 
 
@@ -1276,6 +1729,132 @@ def compute_emissions_breakdown(
     )
 
 
+def compute_equity_breakdown(
+    y: Sequence[int],
+    domain: RouteFleetDomain | None = None,
+    parameters: CostParameters | None = None,
+    cost_parameters: CostParameters | None = None,
+) -> SystemEquityBreakdown:
+    active_domain = domain or get_default_domain()
+    params = parameters or cost_parameters or get_default_parameters()
+    solution = _coerce_solution_vector(y, len(active_domain.route_ids))
+
+    if not is_within_route_bounds(solution, active_domain):
+        raise ValueError("Solution violates per-route bounds")
+
+    baseline_service_lookup = {
+        summary.geoid: summary
+        for summary in compute_tract_service_access_summaries(active_domain.baseline, domain=active_domain)
+    }
+    candidate_service_lookup = {
+        summary.geoid: summary
+        for summary in compute_tract_service_access_summaries(solution, domain=active_domain)
+    }
+
+    tract_breakdowns: list[EquityTractBreakdown] = []
+    for tract in active_domain.equity_tracts:
+        baseline_service = baseline_service_lookup.get(tract.geoid)
+        candidate_service = candidate_service_lookup.get(tract.geoid)
+        baseline_service_intensity = (
+            baseline_service.baseline_service_intensity if baseline_service is not None else 0.0
+        )
+        candidate_service_intensity = (
+            candidate_service.candidate_service_intensity if candidate_service is not None else 0.0
+        )
+        route_count = max(
+            baseline_service.route_count if baseline_service is not None else 0,
+            candidate_service.route_count if candidate_service is not None else 0,
+        )
+        baseline_waiting = _waiting_time_proxy(baseline_service_intensity)
+        candidate_waiting = _waiting_time_proxy(candidate_service_intensity)
+        tract_breakdowns.append(
+            EquityTractBreakdown(
+                geoid=tract.geoid,
+                epc_2050=int(tract.epc_2050),
+                epc_class=tract.epc_class,
+                tract_population=float(tract.population),
+                route_count_touching_tract=int(route_count),
+                baseline_service_intensity=float(baseline_service_intensity),
+                candidate_service_intensity=float(candidate_service_intensity),
+                baseline_waiting_time_proxy=float(baseline_waiting),
+                candidate_waiting_time_proxy=float(candidate_waiting),
+                baseline_utility=_tract_utility(
+                    baseline_service_intensity,
+                    baseline_waiting,
+                    params.equity_parameters,
+                ),
+                candidate_utility=_tract_utility(
+                    candidate_service_intensity,
+                    candidate_waiting,
+                    params.equity_parameters,
+                ),
+                notes=(
+                    "Tract utility uses allocated weekday trips as service intensity and 1/(1+service) as the waiting-time proxy.",
+                ),
+            )
+        )
+
+    epc_tracts = [tract for tract in tract_breakdowns if tract.epc_2050 == 1]
+    non_epc_tracts = [tract for tract in tract_breakdowns if tract.epc_2050 == 0]
+
+    baseline_epc_weighted_mean = _weighted_mean(
+        [(tract.tract_population, tract.baseline_utility) for tract in epc_tracts]
+    )
+    current_epc_weighted_mean = _weighted_mean(
+        [(tract.tract_population, tract.candidate_utility) for tract in epc_tracts]
+    )
+    baseline_non_epc_weighted_mean = _weighted_mean(
+        [(tract.tract_population, tract.baseline_utility) for tract in non_epc_tracts]
+    )
+    current_non_epc_weighted_mean = _weighted_mean(
+        [(tract.tract_population, tract.candidate_utility) for tract in non_epc_tracts]
+    )
+
+    baseline_epc_mean = _mean([tract.baseline_utility for tract in epc_tracts])
+    current_epc_mean = _mean([tract.candidate_utility for tract in epc_tracts])
+    baseline_non_epc_mean = _mean([tract.baseline_utility for tract in non_epc_tracts])
+    current_non_epc_mean = _mean([tract.candidate_utility for tract in non_epc_tracts])
+
+    baseline_population_gap = abs(baseline_non_epc_weighted_mean - baseline_epc_weighted_mean)
+    current_population_gap = abs(current_non_epc_weighted_mean - current_epc_weighted_mean)
+    baseline_area_gap = abs(baseline_non_epc_mean - baseline_epc_mean)
+    current_area_gap = abs(current_non_epc_mean - current_epc_mean)
+    population_gap_percent_delta, population_gap_notes = _percent_change_vs_baseline(
+        current_value=current_population_gap,
+        baseline_value=baseline_population_gap,
+    )
+    area_gap_percent_delta, area_gap_notes = _percent_change_vs_baseline(
+        current_value=current_area_gap,
+        baseline_value=baseline_area_gap,
+    )
+
+    notes = (
+        "Population equity uses the absolute gap between non-EPC and EPC population-weighted mean tract utility.",
+        "Area equity uses the absolute gap between non-EPC and EPC unweighted mean tract utility.",
+    ) + population_gap_notes + area_gap_notes
+    return SystemEquityBreakdown(
+        baseline_population_gap=float(baseline_population_gap),
+        current_population_gap=float(current_population_gap),
+        absolute_population_gap_delta=float(current_population_gap - baseline_population_gap),
+        percent_population_gap_delta=float(population_gap_percent_delta),
+        baseline_area_gap=float(baseline_area_gap),
+        current_area_gap=float(current_area_gap),
+        absolute_area_gap_delta=float(current_area_gap - baseline_area_gap),
+        percent_area_gap_delta=float(area_gap_percent_delta),
+        baseline_epc_weighted_mean_utility=float(baseline_epc_weighted_mean),
+        current_epc_weighted_mean_utility=float(current_epc_weighted_mean),
+        baseline_non_epc_weighted_mean_utility=float(baseline_non_epc_weighted_mean),
+        current_non_epc_weighted_mean_utility=float(current_non_epc_weighted_mean),
+        baseline_epc_mean_utility=float(baseline_epc_mean),
+        current_epc_mean_utility=float(current_epc_mean),
+        baseline_non_epc_mean_utility=float(baseline_non_epc_mean),
+        current_non_epc_mean_utility=float(current_non_epc_mean),
+        tract_breakdowns=tuple(tract_breakdowns),
+        equity_parameters=params.equity_parameters,
+        notes=notes,
+    )
+
+
 def _percent_change_vs_baseline(current_value: float, baseline_value: float) -> tuple[float, tuple[str, ...]]:
     if math.isclose(baseline_value, 0.0, abs_tol=1e-12):
         if math.isclose(current_value, 0.0, abs_tol=1e-12):
@@ -1317,6 +1896,16 @@ def compute_objective_breakdown(
         parameters=params,
         weekday_ridership=weekday_ridership,
     )
+    baseline_equity = compute_equity_breakdown(
+        active_domain.baseline,
+        domain=active_domain,
+        parameters=params,
+    )
+    candidate_equity = compute_equity_breakdown(
+        y,
+        domain=active_domain,
+        parameters=params,
+    )
 
     cost_percent_delta, cost_notes = _percent_change_vs_baseline(
         current_value=candidate_cost.annual_total_cost,
@@ -1326,10 +1915,17 @@ def compute_objective_breakdown(
         current_value=candidate_emissions.candidate_total_emissions_grams,
         baseline_value=baseline_emissions.candidate_total_emissions_grams,
     )
+    equity_percent_delta, equity_notes = _percent_change_vs_baseline(
+        current_value=candidate_equity.current_population_gap,
+        baseline_value=baseline_equity.current_population_gap,
+    )
 
     cost_contribution = cost_percent_delta * params.objective_weights.cost_percent_change_coefficient.value
     emissions_contribution = (
         emissions_percent_delta * params.objective_weights.emissions_percent_change_coefficient.value
+    )
+    equity_contribution = (
+        equity_percent_delta * params.objective_weights.equity_percent_change_coefficient.value
     )
 
     notes = (
@@ -1357,7 +1953,18 @@ def compute_objective_breakdown(
             weighted_contribution=float(emissions_contribution),
             notes=emissions_notes,
         ),
-        total_combined_objective=float(cost_contribution + emissions_contribution),
+        equity=ObjectivePillarBreakdown(
+            baseline_value=float(baseline_equity.current_population_gap),
+            current_value=float(candidate_equity.current_population_gap),
+            absolute_delta=float(
+                candidate_equity.current_population_gap - baseline_equity.current_population_gap
+            ),
+            percent_delta=float(equity_percent_delta),
+            coefficient=float(params.objective_weights.equity_percent_change_coefficient.value),
+            weighted_contribution=float(equity_contribution),
+            notes=equity_notes,
+        ),
+        total_combined_objective=float(cost_contribution + emissions_contribution + equity_contribution),
         notes=notes,
     )
 
@@ -1741,6 +2348,52 @@ def _route_emissions_delta_table(
     return out
 
 
+def _tract_equity_delta_table(
+    baseline: SystemEquityBreakdown,
+    candidate: SystemEquityBreakdown,
+) -> pd.DataFrame:
+    columns = [
+        "geoid",
+        "epc_2050",
+        "epc_class",
+        "tract_population",
+        "route_count_touching_tract",
+        "baseline_service_intensity",
+        "optimized_service_intensity",
+        "delta_service_intensity",
+        "baseline_utility",
+        "optimized_utility",
+        "delta_utility",
+    ]
+    baseline_rows = {tract.geoid: tract for tract in baseline.tract_breakdowns}
+    candidate_rows = {tract.geoid: tract for tract in candidate.tract_breakdowns}
+
+    rows: list[dict[str, float | int | str]] = []
+    for geoid in sorted(candidate_rows):
+        base = baseline_rows[geoid]
+        cand = candidate_rows[geoid]
+        rows.append(
+            {
+                "geoid": geoid,
+                "epc_2050": cand.epc_2050,
+                "epc_class": cand.epc_class,
+                "tract_population": cand.tract_population,
+                "route_count_touching_tract": cand.route_count_touching_tract,
+                "baseline_service_intensity": base.candidate_service_intensity,
+                "optimized_service_intensity": cand.candidate_service_intensity,
+                "delta_service_intensity": cand.candidate_service_intensity - base.candidate_service_intensity,
+                "baseline_utility": base.candidate_utility,
+                "optimized_utility": cand.candidate_utility,
+                "delta_utility": cand.candidate_utility - base.candidate_utility,
+            }
+        )
+
+    out = pd.DataFrame(rows, columns=columns)
+    if not out.empty:
+        out = out.sort_values("delta_utility", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+    return out
+
+
 def run_route_fleet_search(
     domain: RouteFleetDomain | None = None,
     config: SearchConfig | None = None,
@@ -1900,6 +2553,11 @@ def run_route_fleet_search(
         domain=active_domain,
         parameters=active_parameters,
     )
+    initial_equity_breakdown = compute_equity_breakdown(
+        active_domain.baseline,
+        domain=active_domain,
+        parameters=active_parameters,
+    )
     initial_objective_breakdown = compute_objective_breakdown(
         active_domain.baseline,
         domain=active_domain,
@@ -1915,6 +2573,11 @@ def run_route_fleet_search(
         domain=active_domain,
         parameters=active_parameters,
     )
+    best_equity_breakdown = compute_equity_breakdown(
+        sol_best,
+        domain=active_domain,
+        parameters=active_parameters,
+    )
     best_objective_breakdown = compute_objective_breakdown(
         sol_best,
         domain=active_domain,
@@ -1924,6 +2587,10 @@ def run_route_fleet_search(
     route_emissions_delta_table = _route_emissions_delta_table(
         initial_emissions_breakdown,
         best_emissions_breakdown,
+    )
+    tract_equity_delta_table = _tract_equity_delta_table(
+        initial_equity_breakdown,
+        best_equity_breakdown,
     )
 
     return SearchResult(
@@ -1940,6 +2607,8 @@ def run_route_fleet_search(
         best_cost_breakdown=best_breakdown,
         initial_emissions_breakdown=initial_emissions_breakdown,
         best_emissions_breakdown=best_emissions_breakdown,
+        initial_equity_breakdown=initial_equity_breakdown,
+        best_equity_breakdown=best_equity_breakdown,
         initial_objective_breakdown=initial_objective_breakdown,
         best_objective_breakdown=best_objective_breakdown,
         annual_cost_delta_vs_baseline=float(best_breakdown.annual_total_cost - initial_breakdown.annual_total_cost),
@@ -1947,6 +2616,7 @@ def run_route_fleet_search(
         best_budget_slack=float(best_breakdown.annual_budget_slack),
         route_cost_delta_table=route_cost_delta_table,
         route_emissions_delta_table=route_emissions_delta_table,
+        tract_equity_delta_table=tract_equity_delta_table,
     )
 
 
