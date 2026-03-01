@@ -1,0 +1,17 @@
+scenario_id,run_label,cost_weight,emissions_weight,equity_weight,seed,iterations,run_id,initial_objective,best_objective,objective_improvement,accepted_improving_moves,accepted_nonimproving_moves,event_count,route_delta_rows,tract_delta_rows,routes_changed
+balanced,Balanced Weights,1.0,1.0,1.0,42,1,balanced__iter_001__seed_42,0.0,-3.129414200195856,3.129414200195856,1,0,1,57,244,2
+balanced,Balanced Weights,1.0,1.0,1.0,42,4,balanced__iter_004__seed_42,0.0,-17.18425849972782,17.18425849972782,4,0,4,57,244,5
+balanced,Balanced Weights,1.0,1.0,1.0,42,16,balanced__iter_016__seed_42,0.0,-58.72207876132016,58.72207876132016,16,0,16,57,244,10
+balanced,Balanced Weights,1.0,1.0,1.0,42,64,balanced__iter_064__seed_42,0.0,-107.88667189103415,107.88667189103415,64,0,64,57,244,32
+cost_priority,Cost Priority,1.5,0.75,0.75,42,1,cost_priority__iter_001__seed_42,0.0,-2.341745549292363,2.341745549292363,1,0,1,57,244,2
+cost_priority,Cost Priority,1.5,0.75,0.75,42,4,cost_priority__iter_004__seed_42,0.0,-12.909608711749378,12.909608711749378,4,0,4,57,244,6
+cost_priority,Cost Priority,1.5,0.75,0.75,42,16,cost_priority__iter_016__seed_42,0.0,-43.86024518078854,43.86024518078854,16,0,16,57,244,10
+cost_priority,Cost Priority,1.5,0.75,0.75,42,64,cost_priority__iter_064__seed_42,0.0,-82.42781049981775,82.42781049981775,64,0,64,57,244,31
+emissions_priority,Emissions Priority,0.75,1.5,0.75,42,1,emissions_priority__iter_001__seed_42,0.0,-2.16153134436651,2.16153134436651,1,0,1,57,244,2
+emissions_priority,Emissions Priority,0.75,1.5,0.75,42,4,emissions_priority__iter_004__seed_42,0.0,-12.667325616461252,12.667325616461252,4,0,4,57,244,5
+emissions_priority,Emissions Priority,0.75,1.5,0.75,42,16,emissions_priority__iter_016__seed_42,0.0,-43.0645838691843,43.0645838691843,16,0,16,57,244,12
+emissions_priority,Emissions Priority,0.75,1.5,0.75,42,64,emissions_priority__iter_064__seed_42,0.0,-89.42988898370571,89.42988898370571,64,0,64,57,244,38
+equity_priority,Equity Priority,0.75,0.75,1.5,42,1,equity_priority__iter_001__seed_42,0.0,-4.905193270105045,4.905193270105045,1,0,1,57,244,2
+equity_priority,Equity Priority,0.75,0.75,1.5,42,4,equity_priority__iter_004__seed_42,0.0,-26.101792603489635,26.101792603489635,4,0,4,57,244,6
+equity_priority,Equity Priority,0.75,0.75,1.5,42,16,equity_priority__iter_016__seed_42,0.0,-89.7466135386304,89.7466135386304,16,0,16,57,244,10
+equity_priority,Equity Priority,0.75,0.75,1.5,42,64,equity_priority__iter_064__seed_42,0.0,-154.55337644796398,154.55337644796398,64,0,64,57,244,32

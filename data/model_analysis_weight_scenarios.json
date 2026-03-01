@@ -1,0 +1,30 @@
+[
+  {
+    "scenario_id": "balanced",
+    "run_label": "Balanced Weights",
+    "cost_weight": 1.0,
+    "emissions_weight": 1.0,
+    "equity_weight": 1.0
+  },
+  {
+    "scenario_id": "cost_priority",
+    "run_label": "Cost Priority",
+    "cost_weight": 1.5,
+    "emissions_weight": 0.75,
+    "equity_weight": 0.75
+  },
+  {
+    "scenario_id": "emissions_priority",
+    "run_label": "Emissions Priority",
+    "cost_weight": 0.75,
+    "emissions_weight": 1.5,
+    "equity_weight": 0.75
+  },
+  {
+    "scenario_id": "equity_priority",
+    "run_label": "Equity Priority",
+    "cost_weight": 0.75,
+    "emissions_weight": 0.75,
+    "equity_weight": 1.5
+  }
+]
