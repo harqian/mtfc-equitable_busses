@@ -4,21 +4,33 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
 
-from model import build_sf_equity_data_bundle, load_census_tract_geometries
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from model import build_sf_equity_data_bundle, load_census_tract_geometries, load_epc_tracts_geojson
 
 
 @dataclass(frozen=True)
 class ValidationSummary:
-    sf_epc_tracts: int
+    live_sf_epc_tracts: int
+    final_sf_tracts: int
+    final_epc_tracts: int
+    final_non_epc_tracts: int
     sf_population_rows: int
-    population_join_matches: int
-    population_join_unmatched: int
+    sf_population_matches_geometry: int
+    sf_population_missing_geometry: int
     sf_tract_geometry_rows: int
-    mtc_population_field: str
+    live_mtc_population_field: str
+    live_epc_matches_baseline: int
+    live_epc_unmatched_baseline: int
+    bundle_population_note: str
+    bundle_unmatched_epc_note: str
     stop_rows: int
     unique_stops: int
     stops_with_tract_match: int
@@ -83,19 +95,31 @@ def load_stop_points(path: str) -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
 
 
 def validate_sources(population_csv: str, route_stops_csv: str) -> ValidationSummary:
+    live_epc = load_epc_tracts_geojson()
+    live_sf_epc = live_epc.loc[live_epc["geoid"].astype(str).str.startswith("06075")].copy()
     equity_bundle = build_sf_equity_data_bundle()
-    sf_epc = equity_bundle.sf_epc_tracts.copy()
+    sf_tracts_with_equity = equity_bundle.sf_epc_tracts.copy()
 
     population = load_population_table(population_csv)
-    population_join = sf_epc.merge(population, on="geoid", how="left", indicator=True)
-    population_join_matches = int((population_join["_merge"] == "both").sum())
-    if population_join_matches == 0:
-        raise ValueError("No SF EPC tracts matched the local population CSV by GEOID")
-
     tracts = load_census_tract_geometries()
     sf_tracts = tracts.loc[tracts["COUNTYFP"] == "075", ["GEOID", "geometry"]].copy()
     if sf_tracts.crs != "EPSG:4326":
         sf_tracts = sf_tracts.to_crs("EPSG:4326")
+
+    population_join = sf_tracts.merge(
+        population,
+        left_on="GEOID",
+        right_on="geoid",
+        how="left",
+        indicator=True,
+    )
+    sf_population_matches_geometry = int((population_join["_merge"] == "both").sum())
+    if sf_population_matches_geometry == 0:
+        raise ValueError("No San Francisco census tracts matched the local population CSV by GEOID")
+
+    live_epc_matches_baseline = int(live_sf_epc["geoid"].isin(sf_tracts_with_equity["geoid"]).sum())
+    if live_epc_matches_baseline == 0:
+        raise ValueError("No live San Francisco EPC GEOIDs matched the final tract baseline")
 
     stops, stop_points = load_stop_points(route_stops_csv)
     stop_tract_join = gpd.sjoin(
@@ -109,7 +133,7 @@ def validate_sources(population_csv: str, route_stops_csv: str) -> ValidationSum
         raise ValueError("No bus stops were assigned to a San Francisco census tract")
 
     stop_epc_join = stop_tract_join.merge(
-        sf_epc.loc[:, ["geoid", "epc_2050", "epc_class"]],
+        sf_tracts_with_equity.loc[:, ["geoid", "epc_2050", "epc_class"]],
         left_on="GEOID",
         right_on="geoid",
         how="left",
@@ -122,12 +146,26 @@ def validate_sources(population_csv: str, route_stops_csv: str) -> ValidationSum
     route_epc = stops.loc[stops["stop_id"].astype(str).isin(epc_stop_ids), ["route_id", "stop_id"]].drop_duplicates()
 
     return ValidationSummary(
-        sf_epc_tracts=int(len(sf_epc)),
+        live_sf_epc_tracts=int(len(live_sf_epc)),
+        final_sf_tracts=int(len(sf_tracts_with_equity)),
+        final_epc_tracts=int((sf_tracts_with_equity["epc_2050"] == 1).sum()),
+        final_non_epc_tracts=int((sf_tracts_with_equity["epc_2050"] == 0).sum()),
         sf_population_rows=int(len(population)),
-        population_join_matches=population_join_matches,
-        population_join_unmatched=int(len(sf_epc) - population_join_matches),
+        sf_population_matches_geometry=sf_population_matches_geometry,
+        sf_population_missing_geometry=int(len(sf_tracts) - sf_population_matches_geometry),
         sf_tract_geometry_rows=int(len(sf_tracts)),
-        mtc_population_field=equity_bundle.population_field,
+        live_mtc_population_field=next(
+            (
+                note.split("'")[1]
+                for note in equity_bundle.notes
+                if "live MTC EPC field" in note and "'" in note
+            ),
+            "unknown",
+        ),
+        live_epc_matches_baseline=live_epc_matches_baseline,
+        live_epc_unmatched_baseline=int(len(live_sf_epc) - live_epc_matches_baseline),
+        bundle_population_note=equity_bundle.notes[0],
+        bundle_unmatched_epc_note=equity_bundle.notes[-1],
         stop_rows=int(len(stops)),
         unique_stops=int(len(stop_points)),
         stops_with_tract_match=stops_with_tract_match,
@@ -150,12 +188,19 @@ def main() -> int:
         return 1
 
     print("Equity data validation succeeded")
-    print(f"- live SF EPC tracts: {summary.sf_epc_tracts}")
-    print(f"- MTC population field used for equity weighting: {summary.mtc_population_field}")
+    print(f"- live SF EPC tracts from MTC feed: {summary.live_sf_epc_tracts}")
+    print(f"- final SF tracts in equity bundle: {summary.final_sf_tracts}")
+    print(f"- final EPC tracts in equity bundle: {summary.final_epc_tracts}")
+    print(f"- final non-EPC tracts in equity bundle: {summary.final_non_epc_tracts}")
+    print(f"- live MTC population field available in EPC feed: {summary.live_mtc_population_field}")
+    print(f"- population source behavior: {summary.bundle_population_note}")
     print(f"- local SF population rows: {summary.sf_population_rows}")
-    print(f"- EPC tracts matched to local population: {summary.population_join_matches}")
-    print(f"- EPC tracts missing from local population: {summary.population_join_unmatched}")
+    print(f"- SF tract geometries matched to local population: {summary.sf_population_matches_geometry}")
+    print(f"- SF tract geometries missing local population: {summary.sf_population_missing_geometry}")
     print(f"- SF tract geometries from Census TIGER: {summary.sf_tract_geometry_rows}")
+    print(f"- live SF EPC GEOIDs matched into final baseline: {summary.live_epc_matches_baseline}")
+    print(f"- live SF EPC GEOIDs excluded from final baseline: {summary.live_epc_unmatched_baseline}")
+    print(f"- EPC overlay note: {summary.bundle_unmatched_epc_note}")
     print(f"- route-stop rows with coordinates: {summary.stop_rows}")
     print(f"- unique bus stops tested: {summary.unique_stops}")
     print(f"- stops matched to SF census tracts: {summary.stops_with_tract_match}")
@@ -163,10 +208,10 @@ def main() -> int:
     print(f"- unique stops inside EPC 2050 tracts: {summary.epc_stop_count}")
     print(f"- unique stops outside EPC 2050 tracts: {summary.non_epc_stop_count}")
     print(f"- unique routes touching EPC 2050 tracts: {summary.unique_routes_touching_epc}")
-    if summary.population_join_unmatched > 0:
+    if summary.live_epc_unmatched_baseline > 0:
         print(
-            "- warning: the live EPC feed is usable, but the local population CSV does not cover every "
-            "live SF EPC tract GEOID"
+            "- warning: the live EPC feed is usable, but some live EPC GEOIDs do not align with the "
+            "current SF tract geometry/population baseline"
         )
     return 0
 

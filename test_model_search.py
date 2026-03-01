@@ -8,6 +8,7 @@ from unittest import mock
 import geopandas as gpd
 from shapely.geometry import Polygon
 
+from data_utils import find_data_file as resolve_data_file
 from model import (
     SearchConfig,
     _load_weekday_ridership,
@@ -25,6 +26,7 @@ from model import (
     has_global_fleet_conservation,
     is_feasible_solution,
     is_within_route_bounds,
+    load_epc_tracts_geojson,
     load_parameters,
     load_route_fleet_domain,
     make_add_move,
@@ -321,6 +323,33 @@ class TestSearchLoopBehavior(unittest.TestCase):
 
 
 class TestPhaseOneEquityData(unittest.TestCase):
+    def _mock_epc_feature_collection(self) -> dict[str, object]:
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "geoid": "06075010100",
+                        "epc_2050": 1,
+                        "epc_class": "Tier 1",
+                        "tot_pop": 1200,
+                    },
+                    "geometry": {"type": "Point", "coordinates": [-122.4, 37.7]},
+                },
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "geoid": "06075010200",
+                        "epc_2050": 0,
+                        "epc_class": "Not EPC",
+                        "tot_pop": 800,
+                    },
+                    "geometry": {"type": "Point", "coordinates": [-122.5, 37.8]},
+                },
+            ],
+        }
+
     def _mock_epc_frame(self) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame(
             {
@@ -343,22 +372,70 @@ class TestPhaseOneEquityData(unittest.TestCase):
             crs="EPSG:4326",
         )
 
+    @mock.patch("model.load_sf_tract_population_table")
     @mock.patch("model._download_to_path")
     @mock.patch("model.gpd.read_file")
-    def test_equity_loader_returns_sf_rows_with_population_and_is_deterministic(self, read_file: mock.Mock, _download: mock.Mock) -> None:
+    def test_equity_loader_returns_sf_rows_with_population_and_is_deterministic(
+        self,
+        read_file: mock.Mock,
+        _download: mock.Mock,
+        load_population: mock.Mock,
+    ) -> None:
+        _download.side_effect = lambda _url, out_path, attempts=3: out_path.write_text("{}", encoding="utf-8")
         read_file.side_effect = lambda path: (
             self._mock_epc_frame() if str(path).endswith("mtc_epc.geojson") else self._mock_census_frame()
+        )
+        load_population.return_value = self._mock_epc_frame().loc[:, ["geoid", "tot_pop"]].rename(
+            columns={"tot_pop": "population"}
         )
 
         first = build_sf_equity_data_bundle()
         second = build_sf_equity_data_bundle()
 
-        self.assertEqual(first.population_field, "tot_pop")
+        self.assertEqual(first.population_field, "population")
         self.assertEqual(list(first.sf_epc_tracts["geoid"]), ["06075010100", "06075010200"])
         self.assertEqual(list(first.sf_epc_tracts["epc_2050"]), [1, 0])
         self.assertEqual(list(first.sf_epc_tracts["tract_population"]), [1200, 800])
         self.assertEqual(first.sf_epc_tracts[["geoid", "epc_2050", "epc_class", "tract_population"]].to_dict("records"),
                          second.sf_epc_tracts[["geoid", "epc_2050", "epc_class", "tract_population"]].to_dict("records"))
+
+    @mock.patch("model._download_to_path")
+    @mock.patch("model.gpd.read_file")
+    def test_load_epc_tracts_geojson_parses_feature_collection_when_driver_rejects_payload(
+        self,
+        read_file: mock.Mock,
+        download: mock.Mock,
+    ) -> None:
+        def write_feature_collection(_url: str, out_path: Path, attempts: int = 3) -> None:
+            out_path.write_text(json.dumps(self._mock_epc_feature_collection()), encoding="utf-8")
+
+        download.side_effect = write_feature_collection
+        read_file.side_effect = RuntimeError("unsupported format")
+
+        gdf = load_epc_tracts_geojson()
+
+        self.assertEqual(list(gdf["geoid"]), ["06075010100", "06075010200"])
+        self.assertEqual(list(gdf["epc_2050"]), [1, 0])
+        self.assertEqual(list(gdf["tot_pop"]), [1200, 800])
+
+    @mock.patch("model.gpd.read_file")
+    @mock.patch("model._download_to_path")
+    def test_load_epc_tracts_geojson_falls_back_to_cached_payload_when_live_download_fails(
+        self,
+        download: mock.Mock,
+        read_file: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            cache_path = Path(tempdir) / "mtc_epc.geojson"
+            cache_path.write_text(json.dumps(self._mock_epc_feature_collection()), encoding="utf-8")
+            download.side_effect = ConnectionRefusedError("upstream unavailable")
+            read_file.side_effect = RuntimeError("unsupported format")
+
+            with mock.patch("model._equity_cache_path", return_value=cache_path):
+                gdf = load_epc_tracts_geojson()
+
+        self.assertEqual(list(gdf["geoid"]), ["06075010100", "06075010200"])
+        self.assertEqual(list(gdf["epc_class"]), ["Tier 1", "Not EPC"])
 
 
 class TestPhaseTwoRouteDrivers(unittest.TestCase):
@@ -550,6 +627,44 @@ class TestPhaseTwoRouteDrivers(unittest.TestCase):
         self.assertEqual(dict(coverage1[0].stop_counts_by_tract)["06075000100"], 4)
         self.assertTrue(all(len(summary.tract_geoids) >= 0 for summary in coverage1))
 
+    @mock.patch("model.get_default_equity_data")
+    @mock.patch("model.find_data_file")
+    def test_explicit_default_route_stops_path_still_builds_equity_cache(
+        self,
+        find_data_file_mock: mock.Mock,
+        get_default_equity_data_mock: mock.Mock,
+    ) -> None:
+        def fake_find_data_file(name: str) -> Path:
+            if name == "simplified_bus_route_stops.csv":
+                return self.route_stops_path
+            if name == "simplified_bus_routes.csv":
+                return self.routes_path
+            return resolve_data_file(name)
+
+        find_data_file_mock.side_effect = fake_find_data_file
+        get_default_equity_data_mock.return_value = build_sf_equity_data_bundle(
+            epc_tracts=self.synthetic_sf_tracts.loc[
+                :, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]
+            ].rename(columns={"tract_population": "tot_pop"}),
+            census_tracts=gpd.GeoDataFrame(
+                {
+                    "GEOID": ["06075000100", "06075000200"],
+                    "COUNTYFP": ["075", "075"],
+                },
+                geometry=self.synthetic_sf_tracts.geometry,
+                crs="EPSG:4326",
+            ),
+            population_table=self.synthetic_sf_tracts.loc[:, ["geoid", "tract_population"]].rename(
+                columns={"tract_population": "population"}
+            ),
+        )
+
+        domain = load_route_fleet_domain(self.routes_path, route_stops_path=self.route_stops_path)
+
+        self.assertEqual(len(domain.equity_tracts), 2)
+        self.assertTrue(any(len(summary.tract_geoids) > 0 for summary in domain.route_tract_coverage))
+        self.assertTrue(any(domain.route_metadata["touches_epc_tract"]))
+
     def test_candidate_tract_service_changes_monotonically_with_fleet(self) -> None:
         baseline = {row.geoid: row for row in compute_tract_service_access_summaries((1, 2), domain=self.domain)}
         expanded = {row.geoid: row for row in compute_tract_service_access_summaries((2, 2), domain=self.domain)}
@@ -687,11 +802,6 @@ class TestPhaseThreeObjectiveAndReporting(unittest.TestCase):
             result.best_budget_slack,
             result.best_cost_breakdown.reporting_constants.annual_budget_ceiling.value
             - result.best_cost_breakdown.annual_total_cost,
-        )
-        self.assertAlmostEqual(
-            result.best_objective_breakdown.total_combined_objective,
-            result.best_objective_breakdown.cost.weighted_contribution
-            + result.best_objective_breakdown.emissions.weighted_contribution,
         )
         self.assertAlmostEqual(
             result.best_objective_breakdown.total_combined_objective,

@@ -4,6 +4,7 @@ import math
 import pathlib
 import random
 import re
+import shutil
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ _EQUITY_POPULATION_FIELDS = (
     "population",
     "total_population",
 )
+_EQUITY_CACHE_DIR = Path(tempfile.gettempdir()) / "mtfc-equitable_busses"
 
 
 @dataclass(frozen=True)
@@ -400,15 +402,53 @@ def _resolve_equity_population_field(columns: Sequence[object]) -> str:
     )
 
 
+def _equity_cache_path(filename: str) -> Path:
+    return _EQUITY_CACHE_DIR / filename
+
+
+def _load_geojson_frame_from_payload(path: Path, *, source_label: str) -> gpd.GeoDataFrame:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("features"), list):
+        return gpd.GeoDataFrame.from_features(payload["features"], crs="EPSG:4326")
+
+    for key in ("data", "value", "items", "results"):
+        nested = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(nested, dict) and isinstance(nested.get("features"), list):
+            return gpd.GeoDataFrame.from_features(nested["features"], crs="EPSG:4326")
+        if isinstance(nested, list) and nested and all(isinstance(item, dict) for item in nested):
+            return gpd.GeoDataFrame.from_features(nested, crs="EPSG:4326")
+
+    if isinstance(payload, list) and payload and all(isinstance(item, dict) for item in payload):
+        return gpd.GeoDataFrame.from_features(payload, crs="EPSG:4326")
+
+    if isinstance(payload, dict):
+        keys = ", ".join(sorted(str(key) for key in payload.keys())[:8])
+        raise ValueError(
+            f"{source_label} did not contain GeoJSON features; top-level keys were [{keys}]"
+        )
+    raise ValueError(f"{source_label} did not contain a supported GeoJSON payload")
+
+
+def _load_epc_frame_from_path(path: Path, *, source_label: str) -> gpd.GeoDataFrame:
+    try:
+        return gpd.read_file(path)
+    except Exception:
+        return _load_geojson_frame_from_payload(path, source_label=source_label)
+
+
 def load_epc_tracts_geojson() -> gpd.GeoDataFrame:
+    cache_path = _equity_cache_path("mtc_epc.geojson")
     with tempfile.TemporaryDirectory(prefix="equity-data-") as tempdir:
         geojson_path = Path(tempdir) / "mtc_epc.geojson"
-        _download_to_path(MTC_EPC_GEOJSON_URL, geojson_path)
         try:
-            gdf = gpd.read_file(geojson_path)
+            _download_to_path(MTC_EPC_GEOJSON_URL, geojson_path)
+            gdf = _load_epc_frame_from_path(geojson_path, source_label=MTC_EPC_GEOJSON_URL)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(geojson_path, cache_path)
         except Exception:
-            payload = json.loads(geojson_path.read_text(encoding="utf-8"))
-            gdf = gpd.GeoDataFrame.from_features(payload["features"], crs="EPSG:4326")
+            if not cache_path.exists():
+                raise
+            gdf = _load_epc_frame_from_path(cache_path, source_label=str(cache_path))
     _require_columns(gdf, {"geoid", "epc_2050", "epc_class", "geometry"}, "MTC EPC GeoJSON")
     population_field = _resolve_equity_population_field(gdf.columns)
     gdf["geoid"] = gdf["geoid"].astype(str)
@@ -429,12 +469,27 @@ def load_census_tract_geometries() -> gpd.GeoDataFrame:
     return gdf
 
 
+def load_sf_tract_population_table(
+    data_path: str | pathlib.Path | None = None,
+) -> pd.DataFrame:
+    csv_path = find_data_file("sf_population_density_tracts_2019_2023.csv") if data_path is None else Path(data_path)
+    population = pd.read_csv(csv_path, dtype={"geoid": str})
+    _require_columns(population, {"geoid", "population"}, f"tract population CSV {csv_path}")
+    population = population.loc[:, ["geoid", "population"]].copy()
+    population["geoid"] = population["geoid"].astype(str)
+    population["population"] = pd.to_numeric(population["population"], errors="coerce")
+    population = population.dropna(subset=["population"]).drop_duplicates(subset=["geoid"])
+    return population.sort_values(["geoid"]).reset_index(drop=True)
+
+
 def build_sf_equity_data_bundle(
     epc_tracts: gpd.GeoDataFrame | None = None,
     census_tracts: gpd.GeoDataFrame | None = None,
+    population_table: pd.DataFrame | None = None,
 ) -> EquityDataBundle:
     epc = load_epc_tracts_geojson() if epc_tracts is None else epc_tracts.copy()
     tracts = load_census_tract_geometries() if census_tracts is None else census_tracts.copy()
+    population = load_sf_tract_population_table() if population_table is None else population_table.copy()
 
     population_field = _resolve_equity_population_field(epc.columns)
     sf_epc = epc.loc[epc["geoid"].astype(str).str.startswith(SF_TRACT_GEOID_PREFIX)].copy()
@@ -447,30 +502,43 @@ def build_sf_equity_data_bundle(
     if sf_tracts.crs != "EPSG:4326":
         sf_tracts = sf_tracts.to_crs("EPSG:4326")
 
-    merged = sf_epc.merge(
-        sf_tracts.rename(columns={"GEOID": "geoid"}),
+    population["geoid"] = population["geoid"].astype(str)
+    population["population"] = pd.to_numeric(population["population"], errors="coerce")
+
+    merged = sf_tracts.rename(columns={"GEOID": "geoid"}).merge(
+        population.loc[:, ["geoid", "population"]],
         on="geoid",
-        how="inner",
-        suffixes=("_epc", ""),
+        how="left",
     )
-    if merged.empty:
-        raise ValueError("No San Francisco EPC rows matched San Francisco tract geometries by GEOID")
+    merged = merged.merge(
+        sf_epc.loc[:, ["geoid", "epc_2050", "epc_class", population_field]].drop_duplicates(subset=["geoid"]),
+        on="geoid",
+        how="left",
+    )
 
     merged = gpd.GeoDataFrame(merged, geometry="geometry", crs=sf_tracts.crs)
-    merged = merged.loc[:, ["geoid", "epc_2050", "epc_class", population_field, "geometry"]].copy()
-    merged = merged.rename(columns={population_field: "tract_population"})
+    merged["epc_2050"] = pd.to_numeric(merged["epc_2050"], errors="coerce").fillna(0).astype(int)
+    merged["epc_class"] = merged["epc_class"].fillna("Not EPC").astype(str)
+    merged["population"] = pd.to_numeric(merged["population"], errors="coerce")
+    merged[population_field] = pd.to_numeric(merged[population_field], errors="coerce")
+    merged["tract_population"] = merged["population"].fillna(merged[population_field])
+    merged = merged.loc[:, ["geoid", "epc_2050", "epc_class", "tract_population", "geometry"]].copy()
     merged["tract_population"] = pd.to_numeric(merged["tract_population"], errors="coerce")
     merged = merged.dropna(subset=["tract_population"]).sort_values(["geoid"]).reset_index(drop=True)
     if merged.empty:
-        raise ValueError("No San Francisco EPC tracts retained a usable tract population field")
+        raise ValueError("No San Francisco tract rows retained a usable tract population field")
 
+    matched_epc_geoids = set(merged.loc[merged["epc_2050"] == 1, "geoid"].astype(str))
+    unmatched_epc_count = int((~sf_epc["geoid"].astype(str).isin(matched_epc_geoids)).sum())
     notes = (
-        f"Population weighting uses the live MTC EPC field '{population_field}'.",
+        "Population weighting uses the local SF tract population table when available, "
+        f"with live MTC EPC field '{population_field}' as a fallback.",
         "San Francisco tract geometry comes from the California TIGER tract feed filtered to county FIPS 075.",
+        f"{unmatched_epc_count} live EPC GEOIDs did not match the tract geometry/population baseline and were excluded.",
     )
     return EquityDataBundle(
         sf_epc_tracts=merged,
-        population_field=population_field,
+        population_field="population",
         notes=notes,
     )
 
@@ -1220,6 +1288,14 @@ def load_route_fleet_domain(
     equity_data: EquityDataBundle | None = None,
 ) -> RouteFleetDomain:
     use_default_route_stops = data_path is None and route_stops_path is None
+    route_stops_matches_default = False
+    if route_stops_path is not None:
+        try:
+            route_stops_matches_default = pathlib.Path(route_stops_path).resolve() == find_data_file(
+                "simplified_bus_route_stops.csv"
+            ).resolve()
+        except FileNotFoundError:
+            route_stops_matches_default = False
     if data_path is None:
         csv_path = find_data_file("simplified_bus_routes.csv")
     else:
@@ -1340,7 +1416,7 @@ def load_route_fleet_domain(
 
     should_build_equity_cache = route_stops_path is not None or use_default_route_stops
     active_equity_data: EquityDataBundle | None = equity_data
-    if active_equity_data is None and use_default_route_stops:
+    if active_equity_data is None and (use_default_route_stops or route_stops_matches_default):
         active_equity_data = get_default_equity_data()
     if should_build_equity_cache and active_equity_data is not None:
         route_stops = _load_route_stops_table(route_stops_path)
